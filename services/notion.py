@@ -1,9 +1,13 @@
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 import zoneinfo
 import httpx
 from config import settings
 
 API = "https://api.notion.com/v1"
+NOTION_TIMEOUT = 30
+TITLE_PROPERTY_CANDIDATES = ("Name", "Title", "title")
+CREATED_PROPERTY = "Created"
+TAGS_PROPERTY = "Tags"
 HEADERS = {
     "Authorization": f"Bearer {settings.notion_token}",
     "Notion-Version": "2022-06-28",
@@ -28,17 +32,87 @@ def _today_label() -> str:
     return f"{now.day} {MONTHS_RU[now.month]}"
 
 
-def _extract_title(page: dict) -> str:
-    title_prop = page["properties"].get("title") or page["properties"].get("Name")
+def extract_page_title(page: dict) -> str:
+    title_prop = _find_page_property(page["properties"], "title", TITLE_PROPERTY_CANDIDATES)
     parts = title_prop.get("title", [])
     return "".join(p["plain_text"] for p in parts)
 
 
-def _combine_tags(existing_page: dict | None, new_tags: list[str]) -> list[dict]:
+def _find_page_property(properties: dict, prop_type: str, candidates: tuple[str, ...]) -> dict:
+    for name in candidates:
+        prop = properties.get(name)
+        if prop and prop.get("type") == prop_type:
+            return prop
+    for prop in properties.values():
+        if prop.get("type") == prop_type:
+            return prop
+    raise RuntimeError(f"Notion page is missing a {prop_type} property")
+
+
+def _find_database_property(properties: dict, prop_type: str, candidates: tuple[str, ...]) -> str:
+    for name in candidates:
+        prop = properties.get(name)
+        if prop and prop.get("type") == prop_type:
+            return name
+    for name, prop in properties.items():
+        if prop.get("type") == prop_type:
+            return name
+    available = ", ".join(sorted(properties))
+    raise RuntimeError(f"Notion database is missing a {prop_type} property. Available: {available}")
+
+
+async def _database_properties(http: httpx.AsyncClient) -> dict:
+    resp = await http.get(
+        f"{API}/databases/{settings.notion_database_id}",
+        headers=HEADERS,
+    )
+    if not resp.is_success:
+        raise RuntimeError(f"Notion GET database error {resp.status_code}: {resp.text}")
+    return resp.json().get("properties", {})
+
+
+async def ensure_database_schema(http: httpx.AsyncClient) -> tuple[str, str, str]:
+    """Ensures the Notion database has the properties this bot writes."""
+    properties = await _database_properties(http)
+    title_property = _find_database_property(properties, "title", TITLE_PROPERTY_CANDIDATES)
+
+    updates = {}
+    created = properties.get(CREATED_PROPERTY)
+    if not created:
+        updates[CREATED_PROPERTY] = {"date": {}}
+    elif created.get("type") != "date":
+        raise RuntimeError(f'Notion property "{CREATED_PROPERTY}" must be a date property')
+
+    tags = properties.get(TAGS_PROPERTY)
+    if not tags:
+        updates[TAGS_PROPERTY] = {"multi_select": {}}
+    elif tags.get("type") != "multi_select":
+        raise RuntimeError(f'Notion property "{TAGS_PROPERTY}" must be a multi_select property')
+
+    if updates:
+        resp = await http.patch(
+            f"{API}/databases/{settings.notion_database_id}",
+            headers=HEADERS,
+            json={"properties": updates},
+        )
+        if not resp.is_success:
+            raise RuntimeError(f"Notion PATCH database error {resp.status_code}: {resp.text}")
+
+    return title_property, CREATED_PROPERTY, TAGS_PROPERTY
+
+
+def _combine_tags(
+    existing_page: dict | None,
+    new_tags: list[str],
+    tags_property: str,
+) -> list[dict]:
     """Merges page tags with new ones, always prepends Daily, no duplicates."""
     existing = []
     if existing_page:
-        existing = [t["name"] for t in existing_page["properties"].get("Tags", {}).get("multi_select", [])]
+        existing = [
+            t["name"]
+            for t in existing_page["properties"].get(tags_property, {}).get("multi_select", [])
+        ]
     all_tags = ["Daily"] + [t for t in (existing + new_tags) if t != "Daily"]
     # deduplicate while preserving order
     seen = set()
@@ -51,13 +125,14 @@ def _combine_tags(existing_page: dict | None, new_tags: list[str]) -> list[dict]
 
 
 async def get_today_page() -> dict | None:
-    async with httpx.AsyncClient() as http:
+    async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
+        _, date_property, _ = await ensure_database_schema(http)
         resp = await http.post(
             f"{API}/databases/{settings.notion_database_id}/query",
             headers=HEADERS,
             json={
                 "filter": {
-                    "property": "Created",
+                    "property": date_property,
                     "date": {"equals": _today_date()},
                 }
             },
@@ -69,17 +144,21 @@ async def get_today_page() -> dict | None:
 
 async def create_page(entry_title: str, entry_text: str, entry_tags: list[str]) -> None:
     title = f"{_today_label()} | {entry_title}"
-    async with httpx.AsyncClient() as http:
+    async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
+        title_property, date_property, tags_property = await ensure_database_schema(http)
+        properties = {
+            title_property: {"title": [{"text": {"content": title}}]},
+            date_property: {"date": {"start": _today_date()}},
+            tags_property: {
+                "multi_select": _combine_tags(None, entry_tags, tags_property),
+            },
+        }
         resp = await http.post(
             f"{API}/pages",
             headers=HEADERS,
             json={
                 "parent": {"database_id": settings.notion_database_id},
-                "properties": {
-                    "title": {"title": [{"text": {"content": title}}]},
-                    "Created": {"date": {"start": _today_date()}},
-                    "Tags": {"multi_select": _combine_tags(None, entry_tags)},
-                },
+                "properties": properties,
                 "children": [
                     {
                         "object": "block",
@@ -99,17 +178,19 @@ async def create_page(entry_title: str, entry_text: str, entry_tags: list[str]) 
 
 async def update_page(page: dict, entry_title: str, entry_text: str, entry_tags: list[str]) -> None:
     page_id = page["id"]
-    new_title = f"{_extract_title(page)}, {entry_title}"
-    async with httpx.AsyncClient() as http:
+    new_title = f"{extract_page_title(page)}, {entry_title}"
+    async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
+        title_property, _, tags_property = await ensure_database_schema(http)
+        properties = {
+            title_property: {"title": [{"text": {"content": new_title}}]},
+            tags_property: {
+                "multi_select": _combine_tags(page, entry_tags, tags_property),
+            },
+        }
         resp = await http.patch(
             f"{API}/pages/{page_id}",
             headers=HEADERS,
-            json={
-                "properties": {
-                    "title": {"title": [{"text": {"content": new_title}}]},
-                    "Tags": {"multi_select": _combine_tags(page, entry_tags)},
-                }
-            },
+            json={"properties": properties},
         )
         if not resp.is_success:
             raise RuntimeError(f"Notion PATCH pages error {resp.status_code}: {resp.text}")
@@ -142,18 +223,19 @@ async def get_week_pages() -> list[dict]:
     tz = zoneinfo.ZoneInfo(settings.timezone)
     today = datetime.now(tz).date()
     week_ago = today - timedelta(days=6)
-    async with httpx.AsyncClient() as http:
+    async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
+        _, date_property, _ = await ensure_database_schema(http)
         resp = await http.post(
             f"{API}/databases/{settings.notion_database_id}/query",
             headers=HEADERS,
             json={
                 "filter": {
                     "and": [
-                        {"property": "Created", "date": {"on_or_after": week_ago.isoformat()}},
-                        {"property": "Created", "date": {"on_or_before": today.isoformat()}},
+                        {"property": date_property, "date": {"on_or_after": week_ago.isoformat()}},
+                        {"property": date_property, "date": {"on_or_before": today.isoformat()}},
                     ]
                 },
-                "sorts": [{"property": "Created", "direction": "ascending"}],
+                "sorts": [{"property": date_property, "direction": "ascending"}],
             },
         )
         resp.raise_for_status()

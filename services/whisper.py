@@ -7,7 +7,7 @@ client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
 async def transcribe(audio_path: str) -> str:
     with open(audio_path, "rb") as audio_file:
         response = await client.audio.transcriptions.create(
-            model="whisper-1",
+            model=settings.openai_transcription_model,
             file=audio_file,
             language="ru",
         )
