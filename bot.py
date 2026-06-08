@@ -623,9 +623,9 @@ def main() -> None:
     user_filter = filters.User(user_id=settings.allowed_user_id)
 
     command_handlers = [
-        CommandHandler("start", handle_start),
-        CommandHandler("help", handle_help),
-        CommandHandler("weekly", handle_weekly),
+        CommandHandler("start", handle_start, filters=user_filter),
+        CommandHandler("help", handle_help, filters=user_filter),
+        CommandHandler("weekly", handle_weekly, filters=user_filter),
     ]
 
     for handler in command_handlers:
