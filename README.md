@@ -44,6 +44,7 @@ Daily sport health
 The preview is a reply to the original voice message, so it stays threaded with the audio being processed. Clicking an edit button prompts you to send a new value. After you send it, the same preview message updates in place.
 
 Press **Cancel** to discard a parsed entry without saving it to Notion.
+If Notion saving fails, the preview stays available with the Save button so you can retry.
 
 ### Highlights
 
@@ -74,6 +75,7 @@ The bot works with the Notion Journal database described in the [official guide]
 | `Day`     | Select       | Auto-populated as `YYYY-MM-DD`; group your table by this     |
 
 The bot creates any missing `Created`, `Tags`, and `Day` properties automatically. Existing daily pages still work for summaries because they use the same `Created` date property.
+Save requests are retried for transient Notion/network errors and verified by reading the created page before the bot marks the draft as saved.
 
 ## Installation
 

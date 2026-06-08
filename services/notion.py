@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 import zoneinfo
 import httpx
@@ -5,6 +6,8 @@ from config import settings
 
 API = "https://api.notion.com/v1"
 NOTION_TIMEOUT = 30
+NOTION_RETRY_ATTEMPTS = 3
+NOTION_RETRY_DELAY = 1
 TITLE_PROPERTY_CANDIDATES = ("Name", "Title", "title")
 CREATED_PROPERTY = "Created"
 TAGS_PROPERTY = "Tags"
@@ -14,6 +17,38 @@ HEADERS = {
     "Notion-Version": "2022-06-28",
     "Content-Type": "application/json",
 }
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code in {408, 409, 429} or status_code >= 500
+
+
+async def _request_with_retry(
+    http: httpx.AsyncClient,
+    method: str,
+    url: str,
+    **kwargs,
+) -> httpx.Response:
+    delay = NOTION_RETRY_DELAY
+    request = getattr(http, method)
+    for attempt in range(1, NOTION_RETRY_ATTEMPTS + 1):
+        try:
+            resp = await request(url, headers=HEADERS, **kwargs)
+        except httpx.RequestError as e:
+            if attempt == NOTION_RETRY_ATTEMPTS:
+                raise RuntimeError(
+                    f"Notion {method.upper()} failed after {attempt} attempts: {e}"
+                ) from e
+        else:
+            if resp.is_success:
+                return resp
+            if not _is_retryable_status(resp.status_code) or attempt == NOTION_RETRY_ATTEMPTS:
+                raise RuntimeError(f"Notion {method.upper()} error {resp.status_code}: {resp.text}")
+
+        await asyncio.sleep(delay)
+        delay *= 2
+
+    raise RuntimeError(f"Notion {method.upper()} failed after {NOTION_RETRY_ATTEMPTS} attempts")
+
 
 MONTHS_RU = {
     1: "января", 2: "февраля", 3: "марта", 4: "апреля",
@@ -63,12 +98,11 @@ def _find_database_property(properties: dict, prop_type: str, candidates: tuple[
 
 
 async def _database_properties(http: httpx.AsyncClient) -> dict:
-    resp = await http.get(
+    resp = await _request_with_retry(
+        http,
+        "get",
         f"{API}/databases/{settings.notion_database_id}",
-        headers=HEADERS,
     )
-    if not resp.is_success:
-        raise RuntimeError(f"Notion GET database error {resp.status_code}: {resp.text}")
     return resp.json().get("properties", {})
 
 
@@ -97,13 +131,12 @@ async def ensure_database_schema(http: httpx.AsyncClient) -> tuple[str, str, str
         raise RuntimeError(f'Notion property "{DAY_PROPERTY}" must be a select property')
 
     if updates:
-        resp = await http.patch(
+        await _request_with_retry(
+            http,
+            "patch",
             f"{API}/databases/{settings.notion_database_id}",
-            headers=HEADERS,
             json={"properties": updates},
         )
-        if not resp.is_success:
-            raise RuntimeError(f"Notion PATCH database error {resp.status_code}: {resp.text}")
 
     return title_property, CREATED_PROPERTY, TAGS_PROPERTY, DAY_PROPERTY
 
@@ -139,9 +172,10 @@ async def get_today_page() -> dict | None:
 async def get_today_pages() -> list[dict]:
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
         _, date_property, _, _ = await ensure_database_schema(http)
-        resp = await http.post(
+        resp = await _request_with_retry(
+            http,
+            "post",
             f"{API}/databases/{settings.notion_database_id}/query",
-            headers=HEADERS,
             json={
                 "filter": {
                     "property": date_property,
@@ -150,11 +184,21 @@ async def get_today_pages() -> list[dict]:
                 "sorts": [{"property": date_property, "direction": "ascending"}],
             },
         )
-        resp.raise_for_status()
         return resp.json().get("results", [])
 
 
-async def create_page(entry_title: str, entry_text: str, entry_tags: list[str]) -> None:
+async def _verify_page_created(http: httpx.AsyncClient, page_id: str) -> None:
+    resp = await _request_with_retry(
+        http,
+        "get",
+        f"{API}/pages/{page_id}",
+    )
+    page = resp.json()
+    if page.get("id") != page_id or page.get("archived"):
+        raise RuntimeError(f"Notion saved page verification failed for {page_id}")
+
+
+async def create_page(entry_title: str, entry_text: str, entry_tags: list[str]) -> str:
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
         title_property, date_property, tags_property, day_property = await ensure_database_schema(http)
         properties = {
@@ -165,9 +209,10 @@ async def create_page(entry_title: str, entry_text: str, entry_tags: list[str]) 
                 "multi_select": _combine_tags(None, entry_tags, tags_property),
             },
         }
-        resp = await http.post(
+        resp = await _request_with_retry(
+            http,
+            "post",
             f"{API}/pages",
-            headers=HEADERS,
             json={
                 "parent": {"database_id": settings.notion_database_id},
                 "properties": properties,
@@ -185,7 +230,12 @@ async def create_page(entry_title: str, entry_text: str, entry_tags: list[str]) 
                 ],
             },
         )
-        resp.raise_for_status()
+        page = resp.json()
+        page_id = page.get("id")
+        if not page_id:
+            raise RuntimeError("Notion create page response did not include page id")
+        await _verify_page_created(http, page_id)
+        return page_id
 
 
 async def update_page(page: dict, entry_title: str, entry_text: str, entry_tags: list[str]) -> None:
@@ -199,18 +249,17 @@ async def update_page(page: dict, entry_title: str, entry_text: str, entry_tags:
                 "multi_select": _combine_tags(page, entry_tags, tags_property),
             },
         }
-        resp = await http.patch(
+        await _request_with_retry(
+            http,
+            "patch",
             f"{API}/pages/{page_id}",
-            headers=HEADERS,
             json={"properties": properties},
         )
-        if not resp.is_success:
-            raise RuntimeError(f"Notion PATCH pages error {resp.status_code}: {resp.text}")
-        resp.raise_for_status()
 
-        resp = await http.patch(
+        await _request_with_retry(
+            http,
+            "patch",
             f"{API}/blocks/{page_id}/children",
-            headers=HEADERS,
             json={
                 "children": [
                     {"object": "block", "type": "divider", "divider": {}},
@@ -227,7 +276,6 @@ async def update_page(page: dict, entry_title: str, entry_text: str, entry_tags:
                 ]
             },
         )
-        resp.raise_for_status()
 
 
 async def get_week_pages() -> list[dict]:
@@ -237,9 +285,10 @@ async def get_week_pages() -> list[dict]:
     week_ago = today - timedelta(days=6)
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
         _, date_property, _, _ = await ensure_database_schema(http)
-        resp = await http.post(
+        resp = await _request_with_retry(
+            http,
+            "post",
             f"{API}/databases/{settings.notion_database_id}/query",
-            headers=HEADERS,
             json={
                 "filter": {
                     "and": [
@@ -250,10 +299,9 @@ async def get_week_pages() -> list[dict]:
                 "sorts": [{"property": date_property, "direction": "ascending"}],
             },
         )
-        resp.raise_for_status()
         return resp.json().get("results", [])
 
 
-async def save_entry(entry_title: str, entry_text: str, entry_tags: list[str]) -> None:
-    """Creates a separate Notion database row for every diary entry."""
-    await create_page(entry_title, entry_text, entry_tags)
+async def save_entry(entry_title: str, entry_text: str, entry_tags: list[str]) -> str:
+    """Creates and verifies a separate Notion database row for every diary entry."""
+    return await create_page(entry_title, entry_text, entry_tags)

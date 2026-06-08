@@ -419,15 +419,15 @@ async def _save_draft(query, context: ContextTypes.DEFAULT_TYPE, entry_id: str, 
 
     draft["saving"] = True
     try:
-        await query.edit_message_text("Saving...")
+        await query.edit_message_text("Saving to Notion...")
         await save_entry(draft["title"], draft["text"], draft["tags"])
-        await query.edit_message_text("✓ Saved to Notion")
+        await query.edit_message_text("✓ Saved to Notion and verified")
     except Exception as e:
         logger.exception("Error saving to Notion")
         draft["saving"] = False
         state_store.save_draft(draft)
         await query.edit_message_text(
-            f"Error saving to Notion: {e}\nPlease try Save again.",
+            f"Not saved to Notion: {e}\nDraft kept. Press Save to retry or Cancel to discard.",
             reply_markup=_preview_keyboard(entry_id, highlighted=draft["title"].startswith("⭐ ")),
         )
         return

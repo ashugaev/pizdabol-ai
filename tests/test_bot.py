@@ -143,7 +143,39 @@ class CancelDraftTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("entry-1", fake_context.user_data[bot.DRAFTS_KEY])
         self.assertEqual(fake_state_store.marked_cancelled, ["123:10"])
         self.assertEqual(fake_state_store.removed_drafts, ["entry-1"])
-        self.assertEqual(fake_query.edits, ["Cancelled."])
+        self.assertEqual(fake_query.edits[0]["text"], "Cancelled.")
+
+
+class SaveDraftTests(unittest.IsolatedAsyncioTestCase):
+    async def test_save_draft_keeps_draft_and_retry_button_when_notion_save_fails(self):
+        fake_state_store = FakeStateStore()
+        fake_query = FakeQuery()
+        fake_context = SimpleNamespace(user_data={bot.DRAFTS_KEY: {}})
+        draft = {
+            "id": "entry-1",
+            "title": "Title",
+            "text": "Text",
+            "tags": ["work"],
+            "message_key": "123:10",
+            "saving": False,
+        }
+
+        async def failing_save_entry(title, text, tags):
+            raise RuntimeError("notion timeout")
+
+        with (
+            patch.object(bot, "save_entry", new=failing_save_entry),
+            patch.object(bot, "state_store", fake_state_store),
+            patch.object(bot.logger, "exception"),
+        ):
+            await bot._save_draft(fake_query, fake_context, "entry-1", draft)
+
+        self.assertFalse(draft["saving"])
+        self.assertEqual(fake_state_store.saved_drafts[-1]["id"], "entry-1")
+        self.assertEqual(fake_query.edits[0]["text"], "Saving to Notion...")
+        self.assertIn("Not saved to Notion: notion timeout", fake_query.edits[1]["text"])
+        self.assertIn("Press Save to retry", fake_query.edits[1]["text"])
+        self.assertIsNotNone(fake_query.edits[1].get("reply_markup"))
 
 
 class FakeSendBot:
@@ -177,7 +209,7 @@ class FakeQuery:
         self.edits = []
 
     async def edit_message_text(self, text, **kwargs):
-        self.edits.append(text)
+        self.edits.append({"text": text, **kwargs})
 
 
 class FakeStateStore:
