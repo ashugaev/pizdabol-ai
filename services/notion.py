@@ -164,11 +164,6 @@ def _combine_tags(
     return [{"name": t} for t in unique]
 
 
-async def get_today_page() -> dict | None:
-    pages = await get_today_pages()
-    return pages[0] if pages else None
-
-
 async def get_today_pages() -> list[dict]:
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
         _, date_property, _, _ = await ensure_database_schema(http)
@@ -236,46 +231,6 @@ async def create_page(entry_title: str, entry_text: str, entry_tags: list[str]) 
             raise RuntimeError("Notion create page response did not include page id")
         await _verify_page_created(http, page_id)
         return page_id
-
-
-async def update_page(page: dict, entry_title: str, entry_text: str, entry_tags: list[str]) -> None:
-    page_id = page["id"]
-    new_title = f"{extract_page_title(page)}, {entry_title}"
-    async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        title_property, _, tags_property, _ = await ensure_database_schema(http)
-        properties = {
-            title_property: {"title": [{"text": {"content": new_title}}]},
-            tags_property: {
-                "multi_select": _combine_tags(page, entry_tags, tags_property),
-            },
-        }
-        await _request_with_retry(
-            http,
-            "patch",
-            f"{API}/pages/{page_id}",
-            json={"properties": properties},
-        )
-
-        await _request_with_retry(
-            http,
-            "patch",
-            f"{API}/blocks/{page_id}/children",
-            json={
-                "children": [
-                    {"object": "block", "type": "divider", "divider": {}},
-                    {
-                        "object": "block",
-                        "type": "heading_3",
-                        "heading_3": {"rich_text": [{"text": {"content": entry_title}}]},
-                    },
-                    {
-                        "object": "block",
-                        "type": "paragraph",
-                        "paragraph": {"rich_text": [{"text": {"content": entry_text}}]},
-                    },
-                ]
-            },
-        )
 
 
 async def get_week_pages() -> list[dict]:
