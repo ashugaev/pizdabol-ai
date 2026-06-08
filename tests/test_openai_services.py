@@ -45,6 +45,52 @@ class WhisperTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SummaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_generate_daily_summary_uses_all_today_pages(self):
+        fake_client = FakeChatClient("daily summary")
+        pages = [
+            {
+                "id": "page-1",
+                "properties": {
+                    "Name": {
+                        "type": "title",
+                        "title": [{"plain_text": "First"}],
+                    }
+                },
+            },
+            {
+                "id": "page-2",
+                "properties": {
+                    "Name": {
+                        "type": "title",
+                        "title": [{"plain_text": "Second"}],
+                    }
+                },
+            },
+        ]
+
+        async def fake_get_today_pages():
+            return pages
+
+        async def fake_fetch_page_text(page_id):
+            return {
+                "page-1": "First text",
+                "page-2": "Second text",
+            }[page_id]
+
+        with (
+            patch.object(summary, "openai_client", fake_client),
+            patch.object(summary, "get_today_pages", fake_get_today_pages),
+            patch.object(summary, "_fetch_page_text", fake_fetch_page_text),
+        ):
+            result = await summary.generate_daily_summary()
+
+        self.assertEqual(result, "daily summary")
+        kwargs = fake_client.chat.completions.calls[0]
+        self.assertEqual(
+            kwargs["messages"][1]["content"],
+            "### First\nFirst text\n\n### Second\nSecond text",
+        )
+
     async def test_generate_weekly_report_uses_page_titles_and_configured_model(self):
         fake_client = FakeChatClient("weekly report")
         pages = [

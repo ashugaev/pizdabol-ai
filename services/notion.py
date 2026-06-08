@@ -8,6 +8,7 @@ NOTION_TIMEOUT = 30
 TITLE_PROPERTY_CANDIDATES = ("Name", "Title", "title")
 CREATED_PROPERTY = "Created"
 TAGS_PROPERTY = "Tags"
+DAY_PROPERTY = "Day"
 HEADERS = {
     "Authorization": f"Bearer {settings.notion_token}",
     "Notion-Version": "2022-06-28",
@@ -71,7 +72,7 @@ async def _database_properties(http: httpx.AsyncClient) -> dict:
     return resp.json().get("properties", {})
 
 
-async def ensure_database_schema(http: httpx.AsyncClient) -> tuple[str, str, str]:
+async def ensure_database_schema(http: httpx.AsyncClient) -> tuple[str, str, str, str]:
     """Ensures the Notion database has the properties this bot writes."""
     properties = await _database_properties(http)
     title_property = _find_database_property(properties, "title", TITLE_PROPERTY_CANDIDATES)
@@ -89,6 +90,12 @@ async def ensure_database_schema(http: httpx.AsyncClient) -> tuple[str, str, str
     elif tags.get("type") != "multi_select":
         raise RuntimeError(f'Notion property "{TAGS_PROPERTY}" must be a multi_select property')
 
+    day = properties.get(DAY_PROPERTY)
+    if not day:
+        updates[DAY_PROPERTY] = {"select": {}}
+    elif day.get("type") != "select":
+        raise RuntimeError(f'Notion property "{DAY_PROPERTY}" must be a select property')
+
     if updates:
         resp = await http.patch(
             f"{API}/databases/{settings.notion_database_id}",
@@ -98,7 +105,7 @@ async def ensure_database_schema(http: httpx.AsyncClient) -> tuple[str, str, str
         if not resp.is_success:
             raise RuntimeError(f"Notion PATCH database error {resp.status_code}: {resp.text}")
 
-    return title_property, CREATED_PROPERTY, TAGS_PROPERTY
+    return title_property, CREATED_PROPERTY, TAGS_PROPERTY, DAY_PROPERTY
 
 
 def _combine_tags(
@@ -125,8 +132,13 @@ def _combine_tags(
 
 
 async def get_today_page() -> dict | None:
+    pages = await get_today_pages()
+    return pages[0] if pages else None
+
+
+async def get_today_pages() -> list[dict]:
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        _, date_property, _ = await ensure_database_schema(http)
+        _, date_property, _, _ = await ensure_database_schema(http)
         resp = await http.post(
             f"{API}/databases/{settings.notion_database_id}/query",
             headers=HEADERS,
@@ -134,21 +146,21 @@ async def get_today_page() -> dict | None:
                 "filter": {
                     "property": date_property,
                     "date": {"equals": _today_date()},
-                }
+                },
+                "sorts": [{"property": date_property, "direction": "ascending"}],
             },
         )
         resp.raise_for_status()
-        results = resp.json().get("results", [])
-        return results[0] if results else None
+        return resp.json().get("results", [])
 
 
 async def create_page(entry_title: str, entry_text: str, entry_tags: list[str]) -> None:
-    title = f"{_today_label()} | {entry_title}"
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        title_property, date_property, tags_property = await ensure_database_schema(http)
+        title_property, date_property, tags_property, day_property = await ensure_database_schema(http)
         properties = {
-            title_property: {"title": [{"text": {"content": title}}]},
+            title_property: {"title": [{"text": {"content": entry_title}}]},
             date_property: {"date": {"start": _today_date()}},
+            day_property: {"select": {"name": _today_date()}},
             tags_property: {
                 "multi_select": _combine_tags(None, entry_tags, tags_property),
             },
@@ -180,7 +192,7 @@ async def update_page(page: dict, entry_title: str, entry_text: str, entry_tags:
     page_id = page["id"]
     new_title = f"{extract_page_title(page)}, {entry_title}"
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        title_property, _, tags_property = await ensure_database_schema(http)
+        title_property, _, tags_property, _ = await ensure_database_schema(http)
         properties = {
             title_property: {"title": [{"text": {"content": new_title}}]},
             tags_property: {
@@ -224,7 +236,7 @@ async def get_week_pages() -> list[dict]:
     today = datetime.now(tz).date()
     week_ago = today - timedelta(days=6)
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        _, date_property, _ = await ensure_database_schema(http)
+        _, date_property, _, _ = await ensure_database_schema(http)
         resp = await http.post(
             f"{API}/databases/{settings.notion_database_id}/query",
             headers=HEADERS,
@@ -242,12 +254,6 @@ async def get_week_pages() -> list[dict]:
         return resp.json().get("results", [])
 
 
-async def save_entry(entry_title: str, entry_text: str, entry_tags: list[str]) -> bool:
-    """Creates or updates today's diary page. Returns True if updated, False if created."""
-    page = await get_today_page()
-    if page:
-        await update_page(page, entry_title, entry_text, entry_tags)
-        return True
-    else:
-        await create_page(entry_title, entry_text, entry_tags)
-        return False
+async def save_entry(entry_title: str, entry_text: str, entry_tags: list[str]) -> None:
+    """Creates a separate Notion database row for every diary entry."""
+    await create_page(entry_title, entry_text, entry_tags)

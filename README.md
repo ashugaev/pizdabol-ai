@@ -9,7 +9,7 @@ A Telegram bot that turns voice messages into structured diary entries in Notion
 3. GPT-4o-mini formats the transcription into a title, clean text, and tags
 4. The bot shows a preview — you can edit the title, text, or tags before saving
 5. Optionally mark the entry as a highlight ⭐
-6. Press Save — the entry is appended to today's Notion page (or a new page is created)
+6. Press Save — the entry is saved as its own row in your Notion database
 7. Every day at 21:00 the bot sends a GPT-generated summary of the day
 
 ## Commands
@@ -38,9 +38,12 @@ Daily sport health
 [ ✎ Title ]  [ ✎ Text ]  [ ✎ Tags ]
 [      Mark as Highlight ⭐       ]
 [            ✓ Save              ]
+[            Cancel              ]
 ```
 
 The preview is a reply to the original voice message, so it stays threaded with the audio being processed. Clicking an edit button prompts you to send a new value. After you send it, the same preview message updates in place.
+
+Press **Cancel** to discard a parsed entry without saving it to Notion.
 
 ### Highlights
 
@@ -53,7 +56,7 @@ The `Daily` tag is always added automatically. Additional tags can be:
 - **Extracted from voice** — mention them naturally: _"went for a run today. Tags: sport, health"_
 - **Edited manually** — click **✎ Tags** and send tags separated by commas: `sport, health, work`
 
-When appending to an existing page, tags from all entries are merged without duplicates.
+Each saved entry gets its own Notion row with its own tags.
 
 ## Daily summary
 
@@ -65,9 +68,12 @@ The bot works with the Notion Journal database described in the [official guide]
 
 | Property  | Type         | Notes                                                        |
 |-----------|--------------|--------------------------------------------------------------|
-| `Name`    | Title        | Page title. Format: `9 May \| Entry 1, Entry 2`             |
-| `Created` | Date         | Set per entry. Used to find today's page                     |
+| `Name`    | Title        | Entry title                                                  |
+| `Created` | Date         | Set per entry. Used for daily and weekly summaries           |
 | `Tags`    | Multi-select | Auto-populated. `Daily` is always added                      |
+| `Day`     | Select       | Auto-populated as `YYYY-MM-DD`; group your table by this     |
+
+The bot creates any missing `Created`, `Tags`, and `Day` properties automatically. Existing daily pages still work for summaries because they use the same `Created` date property.
 
 ## Installation
 

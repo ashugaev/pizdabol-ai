@@ -37,6 +37,9 @@ class StateStoreTests(unittest.TestCase):
 
             store.mark_message_saved(key)
             self.assertEqual(store.get_message(key)["status"], "saved")
+
+            store.mark_message_cancelled(key)
+            self.assertEqual(store.get_message(key)["status"], "cancelled")
             store.remove_draft("entry-1")
             self.assertIsNone(store.get_draft("entry-1"))
 
@@ -67,4 +70,3 @@ class StateStoreTests(unittest.TestCase):
             self.assertIsNone(store.get_message("123:1"))
             self.assertIsNotNone(store.get_message("123:2"))
             self.assertIsNotNone(store.get_message("123:3"))
-

@@ -39,6 +39,7 @@ class PreviewRenderingTests(unittest.TestCase):
                 "edit_tags:entry-1",
                 "toggle_highlight:entry-1",
                 "save:entry-1",
+                "cancel:entry-1",
             ],
         )
 
@@ -122,6 +123,29 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_state_store.saved_drafts[0]["preview_msg_id"], 999)
 
 
+class CancelDraftTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cancel_draft_removes_persisted_and_in_memory_draft(self):
+        fake_state_store = FakeStateStore()
+        fake_query = FakeQuery()
+        fake_context = SimpleNamespace(user_data={
+            bot.DRAFTS_KEY: {
+                "entry-1": {
+                    "id": "entry-1",
+                    "message_key": "123:10",
+                }
+            }
+        })
+        draft = fake_context.user_data[bot.DRAFTS_KEY]["entry-1"]
+
+        with patch.object(bot, "state_store", fake_state_store):
+            await bot._cancel_draft(fake_query, fake_context, "entry-1", draft)
+
+        self.assertNotIn("entry-1", fake_context.user_data[bot.DRAFTS_KEY])
+        self.assertEqual(fake_state_store.marked_cancelled, ["123:10"])
+        self.assertEqual(fake_state_store.removed_drafts, ["entry-1"])
+        self.assertEqual(fake_query.edits, ["Cancelled."])
+
+
 class FakeSendBot:
     def __init__(self):
         self.sent_messages = []
@@ -148,10 +172,20 @@ class FakeEditBot:
         )
 
 
+class FakeQuery:
+    def __init__(self):
+        self.edits = []
+
+    async def edit_message_text(self, text, **kwargs):
+        self.edits.append(text)
+
+
 class FakeStateStore:
     def __init__(self):
         self.saved_drafts = []
         self.marked_drafted = []
+        self.marked_cancelled = []
+        self.removed_drafts = []
 
     def save_draft(self, draft):
         self.saved_drafts.append(dict(draft))
@@ -159,3 +193,8 @@ class FakeStateStore:
     def mark_message_drafted(self, key, entry_id):
         self.marked_drafted.append((key, entry_id))
 
+    def mark_message_cancelled(self, key):
+        self.marked_cancelled.append(key)
+
+    def remove_draft(self, entry_id):
+        self.removed_drafts.append(entry_id)

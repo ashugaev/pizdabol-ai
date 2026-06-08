@@ -60,7 +60,7 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
 
         result = await notion.ensure_database_schema(http)
 
-        self.assertEqual(result, ("Name", "Created", "Tags"))
+        self.assertEqual(result, ("Name", "Created", "Tags", "Day"))
         self.assertEqual(len(http.patch_calls), 1)
         self.assertEqual(
             http.patch_calls[0]["json"],
@@ -68,6 +68,7 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
                 "properties": {
                     "Created": {"date": {}},
                     "Tags": {"multi_select": {}},
+                    "Day": {"select": {}},
                 }
             },
         )
@@ -77,10 +78,38 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
             "Name": {"type": "title"},
             "Created": {"type": "rich_text"},
             "Tags": {"type": "multi_select"},
+            "Day": {"type": "select"},
         })
 
         with self.assertRaisesRegex(RuntimeError, 'property "Created" must be a date'):
             await notion.ensure_database_schema(http)
+
+    async def test_ensure_database_schema_rejects_wrong_day_type(self):
+        http = FakeNotionHttp({
+            "Name": {"type": "title"},
+            "Created": {"type": "date"},
+            "Tags": {"type": "multi_select"},
+            "Day": {"type": "rich_text"},
+        })
+
+        with self.assertRaisesRegex(RuntimeError, 'property "Day" must be a select'):
+            await notion.ensure_database_schema(http)
+
+    async def test_save_entry_creates_a_new_page_for_each_entry(self):
+        calls = []
+
+        async def fake_create_page(entry_title, entry_text, entry_tags):
+            calls.append((entry_title, entry_text, entry_tags))
+
+        original_create_page = notion.create_page
+        notion.create_page = fake_create_page
+        try:
+            result = await notion.save_entry("Title", "Text", ["work"])
+        finally:
+            notion.create_page = original_create_page
+
+        self.assertIsNone(result)
+        self.assertEqual(calls, [("Title", "Text", ["work"])])
 
 
 class FakeNotionHttp:
@@ -105,4 +134,3 @@ class FakeResponse:
 
     def json(self):
         return self.payload
-

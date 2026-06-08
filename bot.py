@@ -138,6 +138,7 @@ def _preview_keyboard(entry_id: str, highlighted: bool = False) -> InlineKeyboar
         ],
         [highlight_btn],
         [InlineKeyboardButton("✓ Save", callback_data=f"save:{entry_id}")],
+        [InlineKeyboardButton("Cancel", callback_data=f"cancel:{entry_id}")],
     ])
 
 
@@ -404,6 +405,8 @@ async def entry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if action == "save":
         await _save_draft(query, context, entry_id, draft)
+    elif action == "cancel":
+        await _cancel_draft(query, context, entry_id, draft)
     elif action == "toggle_highlight":
         await _toggle_highlight(context, draft)
     elif action in {"edit_title", "edit_text", "edit_tags"}:
@@ -417,9 +420,8 @@ async def _save_draft(query, context: ContextTypes.DEFAULT_TYPE, entry_id: str, 
     draft["saving"] = True
     try:
         await query.edit_message_text("Saving...")
-        updated = await save_entry(draft["title"], draft["text"], draft["tags"])
-        status = "Added to today's page" if updated else "Saved to Notion"
-        await query.edit_message_text(f"✓ {status}")
+        await save_entry(draft["title"], draft["text"], draft["tags"])
+        await query.edit_message_text("✓ Saved to Notion")
     except Exception as e:
         logger.exception("Error saving to Notion")
         draft["saving"] = False
@@ -433,6 +435,13 @@ async def _save_draft(query, context: ContextTypes.DEFAULT_TYPE, entry_id: str, 
     _drafts(context).pop(entry_id, None)
     state_store.mark_message_saved(draft.get("message_key"))
     state_store.remove_draft(entry_id)
+
+
+async def _cancel_draft(query, context: ContextTypes.DEFAULT_TYPE, entry_id: str, draft: dict) -> None:
+    _drafts(context).pop(entry_id, None)
+    state_store.mark_message_cancelled(draft.get("message_key"))
+    state_store.remove_draft(entry_id)
+    await query.edit_message_text("Cancelled.")
 
 
 async def _toggle_highlight(context: ContextTypes.DEFAULT_TYPE, draft: dict) -> None:
@@ -589,7 +598,7 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(
             entry_callback,
-            pattern="^(save|toggle_highlight|edit_title|edit_text|edit_tags):",
+            pattern="^(save|cancel|toggle_highlight|edit_title|edit_text|edit_tags):",
         )
     )
 

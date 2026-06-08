@@ -100,6 +100,10 @@ class StateStore:
         if key:
             self._update_message(key, {"status": "saved", "error": None})
 
+    def mark_message_cancelled(self, key: str | None) -> None:
+        if key:
+            self._update_message(key, {"status": "cancelled", "error": None})
+
     def mark_message_failed(self, key: str, error: str) -> None:
         self._update_message(key, {"status": "failed", "error": error})
 
