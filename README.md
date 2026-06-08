@@ -73,9 +73,17 @@ The bot works with the Notion Journal database described in the [official guide]
 | `Created` | Date         | Set per entry. Used for daily and weekly summaries           |
 | `Tags`    | Multi-select | Auto-populated. `Daily` is always added                      |
 | `Day`     | Select       | Auto-populated as `YYYY-MM-DD`; group your table by this     |
+| `Source`  | Select       | `voice` or `text`                                            |
+| `Telegram Chat ID` | Number | Source chat for tracing and duplicate checks           |
+| `Telegram Message ID` | Number | Source message for tracing and duplicate checks     |
+| `Voice File Unique ID` | Text | Stable Telegram voice file identifier                 |
+| `Audio Duration` | Number | Voice duration in seconds                                |
+| `Audio File Size` | Number | Voice file size in bytes                                |
+| `Source Text SHA256` | Text | Exact hash for manually sent text notes                |
 
-The bot creates any missing `Created`, `Tags`, and `Day` properties automatically. Existing daily pages still work for summaries because they use the same `Created` date property.
+The bot creates any missing `Created`, `Tags`, `Day`, and metadata properties automatically. Existing daily pages still work for summaries because they use the same `Created` date property.
 Save requests are retried for transient Notion/network errors and verified by reading the created page before the bot marks the draft as saved.
+Before creating a row, the bot checks these metadata fields to avoid duplicates: voice notes use the Telegram voice file id plus audio duration/size, and manual text notes use an exact source-text hash.
 
 ## Installation
 

@@ -18,7 +18,15 @@ class StateStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = StateStore(Path(tmpdir) / "state.json")
 
-            key = store.record_voice(123, 10, "file-1", "2026-06-04T10:00:00+00:00")
+            key = store.record_voice(
+                123,
+                10,
+                "file-1",
+                "2026-06-04T10:00:00+00:00",
+                file_unique_id="voice-unique",
+                duration=42,
+                file_size=1000,
+            )
             duplicate_key = store.record_voice(123, 10, "file-2", None)
             store.mark_message_processing(key)
             store.mark_message_drafted(key, "entry-1")
@@ -28,6 +36,9 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(duplicate_key, key)
             message = store.get_message(key)
             self.assertEqual(message["file_id"], "file-1")
+            self.assertEqual(message["file_unique_id"], "voice-unique")
+            self.assertEqual(message["duration"], 42)
+            self.assertEqual(message["file_size"], 1000)
             self.assertEqual(message["status"], "drafted")
             self.assertEqual(message["entry_id"], "entry-1")
 

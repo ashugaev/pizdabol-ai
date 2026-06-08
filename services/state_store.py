@@ -56,8 +56,23 @@ class StateStore:
     def record_text(self, chat_id: int, message_id: int, text: str, date: str | None) -> str:
         return self._record_message(chat_id, message_id, "text", {"text": text}, date)
 
-    def record_voice(self, chat_id: int, message_id: int, file_id: str, date: str | None) -> str:
-        return self._record_message(chat_id, message_id, "voice", {"file_id": file_id}, date)
+    def record_voice(
+        self,
+        chat_id: int,
+        message_id: int,
+        file_id: str,
+        date: str | None,
+        file_unique_id: str | None = None,
+        duration: int | None = None,
+        file_size: int | None = None,
+    ) -> str:
+        payload = {
+            "file_id": file_id,
+            "file_unique_id": file_unique_id,
+            "duration": duration,
+            "file_size": file_size,
+        }
+        return self._record_message(chat_id, message_id, "voice", payload, date)
 
     def _record_message(
         self,

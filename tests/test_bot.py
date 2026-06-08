@@ -53,6 +53,37 @@ class PreviewRenderingTests(unittest.TestCase):
 
         self.assertEqual(bot._callback_payload(update), (None, None))
 
+    def test_entry_metadata_uses_voice_file_facts_for_deduplication(self):
+        metadata = bot._entry_metadata({
+            "kind": "voice",
+            "chat_id": 123,
+            "message_id": 10,
+            "file_unique_id": "voice-unique",
+            "duration": 42,
+            "file_size": 1000,
+        }, "transcribed text")
+
+        self.assertEqual(metadata, {
+            "source": "voice",
+            "telegram_chat_id": 123,
+            "telegram_message_id": 10,
+            "voice_file_unique_id": "voice-unique",
+            "audio_duration": 42,
+            "audio_file_size": 1000,
+        })
+
+    def test_entry_metadata_hashes_manual_text_for_exact_deduplication(self):
+        metadata = bot._entry_metadata({
+            "kind": "text",
+            "chat_id": 123,
+            "message_id": 10,
+        }, "exact text")
+
+        self.assertEqual(metadata["source"], "text")
+        self.assertEqual(metadata["telegram_chat_id"], 123)
+        self.assertEqual(metadata["telegram_message_id"], 10)
+        self.assertEqual(metadata["source_text_hash"], bot._source_text_hash("exact text"))
+
 
 class ReplyToSourceTests(unittest.IsolatedAsyncioTestCase):
     async def test_reply_to_source_uses_reply_parameters_for_stored_message(self):
@@ -76,6 +107,14 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
         fake_context = SimpleNamespace(bot=FakeEditBot(), user_data={})
         source_message = SimpleNamespace(chat_id=123, message_id=10)
         processing_message = SimpleNamespace(chat_id=123, message_id=20)
+        fake_state_store.messages["123:10"] = {
+            "kind": "voice",
+            "chat_id": 123,
+            "message_id": 10,
+            "file_unique_id": "voice-unique",
+            "duration": 12,
+            "file_size": 345,
+        }
 
         with (
             patch.object(bot, "format_entry", new=AsyncMock(return_value=("Title", "Body", ["work"]))),
@@ -98,6 +137,7 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(edit["parse_mode"], "HTML")
         self.assertEqual(fake_state_store.marked_drafted, [("123:10", "entry-1")])
         self.assertEqual(fake_state_store.saved_drafts[0]["preview_msg_id"], 20)
+        self.assertEqual(fake_state_store.saved_drafts[0]["metadata"]["voice_file_unique_id"], "voice-unique")
         self.assertIn("entry-1", fake_context.user_data[bot.DRAFTS_KEY])
 
     async def test_create_preview_sends_new_reply_when_no_processing_message_exists(self):
@@ -160,7 +200,7 @@ class SaveDraftTests(unittest.IsolatedAsyncioTestCase):
             "saving": False,
         }
 
-        async def failing_save_entry(title, text, tags):
+        async def failing_save_entry(title, text, tags, metadata=None):
             raise RuntimeError("notion timeout")
 
         with (
@@ -214,10 +254,14 @@ class FakeQuery:
 
 class FakeStateStore:
     def __init__(self):
+        self.messages = {}
         self.saved_drafts = []
         self.marked_drafted = []
         self.marked_cancelled = []
         self.removed_drafts = []
+
+    def get_message(self, key):
+        return self.messages.get(key)
 
     def save_draft(self, draft):
         self.saved_drafts.append(dict(draft))

@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import zoneinfo
 import httpx
@@ -12,11 +13,40 @@ TITLE_PROPERTY_CANDIDATES = ("Name", "Title", "title")
 CREATED_PROPERTY = "Created"
 TAGS_PROPERTY = "Tags"
 DAY_PROPERTY = "Day"
+SOURCE_PROPERTY = "Source"
+TELEGRAM_CHAT_ID_PROPERTY = "Telegram Chat ID"
+TELEGRAM_MESSAGE_ID_PROPERTY = "Telegram Message ID"
+VOICE_FILE_UNIQUE_ID_PROPERTY = "Voice File Unique ID"
+AUDIO_DURATION_PROPERTY = "Audio Duration"
+AUDIO_FILE_SIZE_PROPERTY = "Audio File Size"
+SOURCE_TEXT_HASH_PROPERTY = "Source Text SHA256"
 HEADERS = {
     "Authorization": f"Bearer {settings.notion_token}",
     "Notion-Version": "2022-06-28",
     "Content-Type": "application/json",
 }
+
+
+@dataclass(frozen=True)
+class NotionSchema:
+    title: str
+    created: str
+    tags: str
+    day: str
+    source: str
+    telegram_chat_id: str
+    telegram_message_id: str
+    voice_file_unique_id: str
+    audio_duration: str
+    audio_file_size: str
+    source_text_hash: str
+
+
+@dataclass(frozen=True)
+class SaveResult:
+    page_id: str
+    created: bool
+
 
 def _is_retryable_status(status_code: int) -> bool:
     return status_code in {408, 409, 429} or status_code >= 500
@@ -106,29 +136,57 @@ async def _database_properties(http: httpx.AsyncClient) -> dict:
     return resp.json().get("properties", {})
 
 
-async def ensure_database_schema(http: httpx.AsyncClient) -> tuple[str, str, str, str]:
+def _ensure_database_property(
+    properties: dict,
+    updates: dict,
+    name: str,
+    prop_type: str,
+    create_body: dict,
+) -> str:
+    prop = properties.get(name)
+    if not prop:
+        updates[name] = create_body
+    elif prop.get("type") != prop_type:
+        raise RuntimeError(f'Notion property "{name}" must be a {prop_type} property')
+    return name
+
+
+async def ensure_database_schema(http: httpx.AsyncClient) -> NotionSchema:
     """Ensures the Notion database has the properties this bot writes."""
     properties = await _database_properties(http)
     title_property = _find_database_property(properties, "title", TITLE_PROPERTY_CANDIDATES)
 
     updates = {}
-    created = properties.get(CREATED_PROPERTY)
-    if not created:
-        updates[CREATED_PROPERTY] = {"date": {}}
-    elif created.get("type") != "date":
-        raise RuntimeError(f'Notion property "{CREATED_PROPERTY}" must be a date property')
-
-    tags = properties.get(TAGS_PROPERTY)
-    if not tags:
-        updates[TAGS_PROPERTY] = {"multi_select": {}}
-    elif tags.get("type") != "multi_select":
-        raise RuntimeError(f'Notion property "{TAGS_PROPERTY}" must be a multi_select property')
-
-    day = properties.get(DAY_PROPERTY)
-    if not day:
-        updates[DAY_PROPERTY] = {"select": {}}
-    elif day.get("type") != "select":
-        raise RuntimeError(f'Notion property "{DAY_PROPERTY}" must be a select property')
+    created_property = _ensure_database_property(
+        properties, updates, CREATED_PROPERTY, "date", {"date": {}}
+    )
+    tags_property = _ensure_database_property(
+        properties, updates, TAGS_PROPERTY, "multi_select", {"multi_select": {}}
+    )
+    day_property = _ensure_database_property(
+        properties, updates, DAY_PROPERTY, "select", {"select": {}}
+    )
+    source_property = _ensure_database_property(
+        properties, updates, SOURCE_PROPERTY, "select", {"select": {}}
+    )
+    telegram_chat_id_property = _ensure_database_property(
+        properties, updates, TELEGRAM_CHAT_ID_PROPERTY, "number", {"number": {}}
+    )
+    telegram_message_id_property = _ensure_database_property(
+        properties, updates, TELEGRAM_MESSAGE_ID_PROPERTY, "number", {"number": {}}
+    )
+    voice_file_unique_id_property = _ensure_database_property(
+        properties, updates, VOICE_FILE_UNIQUE_ID_PROPERTY, "rich_text", {"rich_text": {}}
+    )
+    audio_duration_property = _ensure_database_property(
+        properties, updates, AUDIO_DURATION_PROPERTY, "number", {"number": {}}
+    )
+    audio_file_size_property = _ensure_database_property(
+        properties, updates, AUDIO_FILE_SIZE_PROPERTY, "number", {"number": {}}
+    )
+    source_text_hash_property = _ensure_database_property(
+        properties, updates, SOURCE_TEXT_HASH_PROPERTY, "rich_text", {"rich_text": {}}
+    )
 
     if updates:
         await _request_with_retry(
@@ -138,7 +196,19 @@ async def ensure_database_schema(http: httpx.AsyncClient) -> tuple[str, str, str
             json={"properties": updates},
         )
 
-    return title_property, CREATED_PROPERTY, TAGS_PROPERTY, DAY_PROPERTY
+    return NotionSchema(
+        title=title_property,
+        created=created_property,
+        tags=tags_property,
+        day=day_property,
+        source=source_property,
+        telegram_chat_id=telegram_chat_id_property,
+        telegram_message_id=telegram_message_id_property,
+        voice_file_unique_id=voice_file_unique_id_property,
+        audio_duration=audio_duration_property,
+        audio_file_size=audio_file_size_property,
+        source_text_hash=source_text_hash_property,
+    )
 
 
 def _combine_tags(
@@ -164,19 +234,110 @@ def _combine_tags(
     return [{"name": t} for t in unique]
 
 
+def _rich_text_property(value: object) -> dict:
+    return {"rich_text": [{"text": {"content": str(value)}}]}
+
+
+def _number_property(value: object) -> dict:
+    return {"number": int(value)}
+
+
+def _metadata_properties(schema: NotionSchema, metadata: dict | None) -> dict:
+    if not metadata:
+        return {}
+
+    properties = {}
+    if metadata.get("source"):
+        properties[schema.source] = {"select": {"name": str(metadata["source"])}}
+    if metadata.get("telegram_chat_id") is not None:
+        properties[schema.telegram_chat_id] = _number_property(metadata["telegram_chat_id"])
+    if metadata.get("telegram_message_id") is not None:
+        properties[schema.telegram_message_id] = _number_property(metadata["telegram_message_id"])
+    if metadata.get("voice_file_unique_id"):
+        properties[schema.voice_file_unique_id] = _rich_text_property(metadata["voice_file_unique_id"])
+    if metadata.get("audio_duration") is not None:
+        properties[schema.audio_duration] = _number_property(metadata["audio_duration"])
+    if metadata.get("audio_file_size") is not None:
+        properties[schema.audio_file_size] = _number_property(metadata["audio_file_size"])
+    if metadata.get("source_text_hash"):
+        properties[schema.source_text_hash] = _rich_text_property(metadata["source_text_hash"])
+    return properties
+
+
+def _metadata_filter(schema: NotionSchema, metadata: dict | None) -> dict | None:
+    if not metadata:
+        return None
+
+    source = metadata.get("source")
+    if source == "text" and metadata.get("source_text_hash"):
+        return {
+            "and": [
+                {"property": schema.source, "select": {"equals": "text"}},
+                {
+                    "property": schema.source_text_hash,
+                    "rich_text": {"equals": metadata["source_text_hash"]},
+                },
+            ]
+        }
+
+    if source == "voice" and metadata.get("voice_file_unique_id"):
+        filters = [
+            {"property": schema.source, "select": {"equals": "voice"}},
+            {
+                "property": schema.voice_file_unique_id,
+                "rich_text": {"equals": metadata["voice_file_unique_id"]},
+            },
+        ]
+        if metadata.get("audio_duration") is not None:
+            filters.append({
+                "property": schema.audio_duration,
+                "number": {"equals": int(metadata["audio_duration"])},
+            })
+        if metadata.get("audio_file_size") is not None:
+            filters.append({
+                "property": schema.audio_file_size,
+                "number": {"equals": int(metadata["audio_file_size"])},
+            })
+        return {"and": filters}
+
+    return None
+
+
+async def _find_duplicate_page(
+    http: httpx.AsyncClient,
+    schema: NotionSchema,
+    metadata: dict | None,
+) -> dict | None:
+    duplicate_filter = _metadata_filter(schema, metadata)
+    if not duplicate_filter:
+        return None
+
+    resp = await _request_with_retry(
+        http,
+        "post",
+        f"{API}/databases/{settings.notion_database_id}/query",
+        json={
+            "filter": duplicate_filter,
+            "page_size": 1,
+        },
+    )
+    results = resp.json().get("results", [])
+    return results[0] if results else None
+
+
 async def get_today_pages() -> list[dict]:
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        _, date_property, _, _ = await ensure_database_schema(http)
+        schema = await ensure_database_schema(http)
         resp = await _request_with_retry(
             http,
             "post",
             f"{API}/databases/{settings.notion_database_id}/query",
             json={
                 "filter": {
-                    "property": date_property,
+                    "property": schema.created,
                     "date": {"equals": _today_date()},
                 },
-                "sorts": [{"property": date_property, "direction": "ascending"}],
+                "sorts": [{"property": schema.created, "direction": "ascending"}],
             },
         )
         return resp.json().get("results", [])
@@ -193,16 +354,28 @@ async def _verify_page_created(http: httpx.AsyncClient, page_id: str) -> None:
         raise RuntimeError(f"Notion saved page verification failed for {page_id}")
 
 
-async def create_page(entry_title: str, entry_text: str, entry_tags: list[str]) -> str:
+async def create_page(
+    entry_title: str,
+    entry_text: str,
+    entry_tags: list[str],
+    metadata: dict | None = None,
+) -> SaveResult:
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        title_property, date_property, tags_property, day_property = await ensure_database_schema(http)
+        schema = await ensure_database_schema(http)
+        duplicate = await _find_duplicate_page(http, schema, metadata)
+        if duplicate:
+            page_id = duplicate["id"]
+            await _verify_page_created(http, page_id)
+            return SaveResult(page_id=page_id, created=False)
+
         properties = {
-            title_property: {"title": [{"text": {"content": entry_title}}]},
-            date_property: {"date": {"start": _today_date()}},
-            day_property: {"select": {"name": _today_date()}},
-            tags_property: {
-                "multi_select": _combine_tags(None, entry_tags, tags_property),
+            schema.title: {"title": [{"text": {"content": entry_title}}]},
+            schema.created: {"date": {"start": _today_date()}},
+            schema.day: {"select": {"name": _today_date()}},
+            schema.tags: {
+                "multi_select": _combine_tags(None, entry_tags, schema.tags),
             },
+            **_metadata_properties(schema, metadata),
         }
         resp = await _request_with_retry(
             http,
@@ -230,7 +403,7 @@ async def create_page(entry_title: str, entry_text: str, entry_tags: list[str]) 
         if not page_id:
             raise RuntimeError("Notion create page response did not include page id")
         await _verify_page_created(http, page_id)
-        return page_id
+        return SaveResult(page_id=page_id, created=True)
 
 
 async def get_week_pages() -> list[dict]:
@@ -239,7 +412,7 @@ async def get_week_pages() -> list[dict]:
     today = datetime.now(tz).date()
     week_ago = today - timedelta(days=6)
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        _, date_property, _, _ = await ensure_database_schema(http)
+        schema = await ensure_database_schema(http)
         resp = await _request_with_retry(
             http,
             "post",
@@ -247,16 +420,21 @@ async def get_week_pages() -> list[dict]:
             json={
                 "filter": {
                     "and": [
-                        {"property": date_property, "date": {"on_or_after": week_ago.isoformat()}},
-                        {"property": date_property, "date": {"on_or_before": today.isoformat()}},
+                        {"property": schema.created, "date": {"on_or_after": week_ago.isoformat()}},
+                        {"property": schema.created, "date": {"on_or_before": today.isoformat()}},
                     ]
                 },
-                "sorts": [{"property": date_property, "direction": "ascending"}],
+                "sorts": [{"property": schema.created, "direction": "ascending"}],
             },
         )
         return resp.json().get("results", [])
 
 
-async def save_entry(entry_title: str, entry_text: str, entry_tags: list[str]) -> str:
+async def save_entry(
+    entry_title: str,
+    entry_text: str,
+    entry_tags: list[str],
+    metadata: dict | None = None,
+) -> SaveResult:
     """Creates and verifies a separate Notion database row for every diary entry."""
-    return await create_page(entry_title, entry_text, entry_tags)
+    return await create_page(entry_title, entry_text, entry_tags, metadata)

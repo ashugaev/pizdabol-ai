@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 import tempfile
@@ -113,6 +114,30 @@ def _message_date(message) -> str | None:
     return None
 
 
+def _source_text_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _entry_metadata(record: dict | None, source_text: str) -> dict:
+    if not record:
+        return {}
+
+    metadata = {
+        "source": record.get("kind"),
+        "telegram_chat_id": record.get("chat_id"),
+        "telegram_message_id": record.get("message_id"),
+    }
+    if record.get("kind") == "voice":
+        metadata.update({
+            "voice_file_unique_id": record.get("file_unique_id"),
+            "audio_duration": record.get("duration"),
+            "audio_file_size": record.get("file_size"),
+        })
+    elif record.get("kind") == "text":
+        metadata["source_text_hash"] = _source_text_hash(source_text)
+    return {key: value for key, value in metadata.items() if value is not None}
+
+
 def _get_draft(context: ContextTypes.DEFAULT_TYPE, entry_id: str) -> dict[str, Any] | None:
     draft = _drafts(context).get(entry_id)
     if draft:
@@ -215,11 +240,15 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
+    voice = message.voice
     message_key = state_store.record_voice(
         chat_id=message.chat_id,
         message_id=message.message_id,
-        file_id=message.voice.file_id,
+        file_id=voice.file_id,
         date=_message_date(message),
+        file_unique_id=getattr(voice, "file_unique_id", None),
+        duration=getattr(voice, "duration", None),
+        file_size=getattr(voice, "file_size", None),
     )
     context.application.create_task(
         _process_message_record(message_key, message, context),
@@ -371,6 +400,7 @@ async def _create_preview(
         "title": title,
         "text": text,
         "tags": tags,
+        "metadata": _entry_metadata(state_store.get_message(message_key) if message_key else None, source_text),
         "chat_id": message.chat_id,
         "preview_msg_id": preview_msg.message_id,
         "saving": False,
@@ -420,8 +450,16 @@ async def _save_draft(query, context: ContextTypes.DEFAULT_TYPE, entry_id: str, 
     draft["saving"] = True
     try:
         await query.edit_message_text("Saving to Notion...")
-        await save_entry(draft["title"], draft["text"], draft["tags"])
-        await query.edit_message_text("✓ Saved to Notion and verified")
+        result = await save_entry(
+            draft["title"],
+            draft["text"],
+            draft["tags"],
+            draft.get("metadata"),
+        )
+        if result.created:
+            await query.edit_message_text("✓ Saved to Notion and verified")
+        else:
+            await query.edit_message_text("✓ Already saved in Notion")
     except Exception as e:
         logger.exception("Error saving to Notion")
         draft["saving"] = False

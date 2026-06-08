@@ -60,7 +60,11 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
 
         result = await notion.ensure_database_schema(http)
 
-        self.assertEqual(result, ("Name", "Created", "Tags", "Day"))
+        self.assertEqual(result.title, "Name")
+        self.assertEqual(result.created, "Created")
+        self.assertEqual(result.tags, "Tags")
+        self.assertEqual(result.day, "Day")
+        self.assertEqual(result.source, "Source")
         self.assertEqual(len(http.patch_calls), 1)
         self.assertEqual(
             http.patch_calls[0]["json"],
@@ -69,6 +73,13 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
                     "Created": {"date": {}},
                     "Tags": {"multi_select": {}},
                     "Day": {"select": {}},
+                    "Source": {"select": {}},
+                    "Telegram Chat ID": {"number": {}},
+                    "Telegram Message ID": {"number": {}},
+                    "Voice File Unique ID": {"rich_text": {}},
+                    "Audio Duration": {"number": {}},
+                    "Audio File Size": {"number": {}},
+                    "Source Text SHA256": {"rich_text": {}},
                 }
             },
         )
@@ -98,9 +109,9 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
     async def test_save_entry_creates_a_new_page_for_each_entry(self):
         calls = []
 
-        async def fake_create_page(entry_title, entry_text, entry_tags):
-            calls.append((entry_title, entry_text, entry_tags))
-            return "page-1"
+        async def fake_create_page(entry_title, entry_text, entry_tags, metadata=None):
+            calls.append((entry_title, entry_text, entry_tags, metadata))
+            return notion.SaveResult(page_id="page-1", created=True)
 
         original_create_page = notion.create_page
         notion.create_page = fake_create_page
@@ -109,8 +120,8 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
         finally:
             notion.create_page = original_create_page
 
-        self.assertEqual(result, "page-1")
-        self.assertEqual(calls, [("Title", "Text", ["work"])])
+        self.assertEqual(result, notion.SaveResult(page_id="page-1", created=True))
+        self.assertEqual(calls, [("Title", "Text", ["work"], None)])
 
     async def test_request_with_retry_retries_transient_notion_errors(self):
         http = FakeRetryHttp([
@@ -138,13 +149,43 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
         original_client = notion.httpx.AsyncClient
         notion.httpx.AsyncClient = lambda timeout: http
         try:
-            page_id = await notion.create_page("Title", "Text", ["work"])
+            result = await notion.create_page("Title", "Text", ["work"], {
+                "source": "voice",
+                "telegram_chat_id": 123,
+                "telegram_message_id": 10,
+                "voice_file_unique_id": "voice-unique",
+                "audio_duration": 42,
+                "audio_file_size": 1000,
+            })
         finally:
             notion.httpx.AsyncClient = original_client
 
-        self.assertEqual(page_id, "page-1")
+        self.assertEqual(result, notion.SaveResult(page_id="page-1", created=True))
         self.assertEqual(http.created_pages, 1)
         self.assertEqual(http.verified_pages, ["page-1"])
+        create_payload = http.post_calls[-1]["json"]
+        self.assertEqual(
+            create_payload["properties"]["Voice File Unique ID"],
+            {"rich_text": [{"text": {"content": "voice-unique"}}]},
+        )
+        self.assertEqual(create_payload["properties"]["Audio Duration"], {"number": 42})
+        self.assertEqual(create_payload["properties"]["Audio File Size"], {"number": 1000})
+
+    async def test_create_page_returns_existing_page_when_metadata_matches_duplicate(self):
+        http = FakeCreatePageHttp(duplicate_id="existing-page")
+        original_client = notion.httpx.AsyncClient
+        notion.httpx.AsyncClient = lambda timeout: http
+        try:
+            result = await notion.create_page("Title", "Text", ["work"], {
+                "source": "text",
+                "source_text_hash": "hash-1",
+            })
+        finally:
+            notion.httpx.AsyncClient = original_client
+
+        self.assertEqual(result, notion.SaveResult(page_id="existing-page", created=False))
+        self.assertEqual(http.created_pages, 0)
+        self.assertEqual(http.verified_pages, ["existing-page"])
 
 
 class FakeNotionHttp:
@@ -171,9 +212,11 @@ class FakeRetryHttp:
 
 
 class FakeCreatePageHttp:
-    def __init__(self):
+    def __init__(self, duplicate_id=None):
         self.created_pages = 0
         self.verified_pages = []
+        self.duplicate_id = duplicate_id
+        self.post_calls = []
 
     async def __aenter__(self):
         return self
@@ -189,6 +232,13 @@ class FakeCreatePageHttp:
                     "Created": {"type": "date"},
                     "Tags": {"type": "multi_select"},
                     "Day": {"type": "select"},
+                    "Source": {"type": "select"},
+                    "Telegram Chat ID": {"type": "number"},
+                    "Telegram Message ID": {"type": "number"},
+                    "Voice File Unique ID": {"type": "rich_text"},
+                    "Audio Duration": {"type": "number"},
+                    "Audio File Size": {"type": "number"},
+                    "Source Text SHA256": {"type": "rich_text"},
                 }
             })
         page_id = url.rsplit("/", 1)[-1]
@@ -196,6 +246,10 @@ class FakeCreatePageHttp:
         return FakeResponse({"id": page_id, "archived": False})
 
     async def post(self, url, headers, json):
+        self.post_calls.append({"url": url, "headers": headers, "json": json})
+        if url.endswith("/query"):
+            results = [{"id": self.duplicate_id}] if self.duplicate_id else []
+            return FakeResponse({"results": results})
         self.created_pages += 1
         return FakeResponse({"id": "page-1"})
 
