@@ -171,6 +171,33 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(create_payload["properties"]["Audio Duration"], {"number": 42})
         self.assertEqual(create_payload["properties"]["Audio File Size"], {"number": 1000})
 
+    async def test_create_page_splits_long_entry_text_into_notion_sized_paragraphs(self):
+        http = FakeCreatePageHttp()
+        long_text = "x" * (notion.NOTION_TEXT_CHUNK_SIZE + 199)
+        original_client = notion.httpx.AsyncClient
+        notion.httpx.AsyncClient = lambda timeout: http
+        try:
+            result = await notion.create_page("Title", long_text, ["work"])
+        finally:
+            notion.httpx.AsyncClient = original_client
+
+        self.assertEqual(result, notion.SaveResult(page_id="page-1", created=True))
+        create_payload = http.post_calls[-1]["json"]
+        paragraph_blocks = [
+            child for child in create_payload["children"]
+            if child["type"] == "paragraph"
+        ]
+        paragraph_chunks = [
+            "".join(item["text"]["content"] for item in block["paragraph"]["rich_text"])
+            for block in paragraph_blocks
+        ]
+
+        self.assertEqual(len(paragraph_blocks), 2)
+        self.assertEqual("".join(paragraph_chunks), long_text)
+        self.assertTrue(
+            all(len(chunk) <= notion.NOTION_TEXT_CHUNK_SIZE for chunk in paragraph_chunks)
+        )
+
     async def test_create_page_returns_existing_page_when_metadata_matches_duplicate(self):
         http = FakeCreatePageHttp(duplicate_id="existing-page")
         original_client = notion.httpx.AsyncClient

@@ -9,6 +9,7 @@ API = "https://api.notion.com/v1"
 NOTION_TIMEOUT = 30
 NOTION_RETRY_ATTEMPTS = 3
 NOTION_RETRY_DELAY = 1
+NOTION_TEXT_CHUNK_SIZE = 2000
 TITLE_PROPERTY_CANDIDATES = ("Name", "Title", "title")
 CREATED_PROPERTY = "Created"
 TAGS_PROPERTY = "Tags"
@@ -234,8 +235,22 @@ def _combine_tags(
     return [{"name": t} for t in unique]
 
 
+def _text_chunks(value: object) -> list[str]:
+    text = str(value)
+    if not text:
+        return [""]
+    return [
+        text[start:start + NOTION_TEXT_CHUNK_SIZE]
+        for start in range(0, len(text), NOTION_TEXT_CHUNK_SIZE)
+    ]
+
+
+def _rich_text(value: object) -> list[dict]:
+    return [{"text": {"content": chunk}} for chunk in _text_chunks(value)]
+
+
 def _rich_text_property(value: object) -> dict:
-    return {"rich_text": [{"text": {"content": str(value)}}]}
+    return {"rich_text": _rich_text(value)}
 
 
 def _number_property(value: object) -> dict:
@@ -325,6 +340,17 @@ async def _find_duplicate_page(
     return results[0] if results else None
 
 
+def _paragraph_blocks(text: str) -> list[dict]:
+    return [
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": _rich_text(chunk)},
+        }
+        for chunk in _text_chunks(text)
+    ]
+
+
 async def get_today_pages() -> list[dict]:
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
         schema = await ensure_database_schema(http)
@@ -369,7 +395,7 @@ async def create_page(
             return SaveResult(page_id=page_id, created=False)
 
         properties = {
-            schema.title: {"title": [{"text": {"content": entry_title}}]},
+            schema.title: {"title": _rich_text(entry_title)},
             schema.created: {"date": {"start": _today_date()}},
             schema.day: {"select": {"name": _today_date()}},
             schema.tags: {
@@ -388,13 +414,9 @@ async def create_page(
                     {
                         "object": "block",
                         "type": "heading_3",
-                        "heading_3": {"rich_text": [{"text": {"content": entry_title}}]},
+                        "heading_3": {"rich_text": _rich_text(entry_title)},
                     },
-                    {
-                        "object": "block",
-                        "type": "paragraph",
-                        "paragraph": {"rich_text": [{"text": {"content": entry_text}}]},
-                    },
+                    *_paragraph_blocks(entry_text),
                 ],
             },
         )
