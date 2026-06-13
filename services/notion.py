@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import zoneinfo
 import httpx
 from config import settings
@@ -17,6 +17,7 @@ DAY_PROPERTY = "Day"
 SOURCE_PROPERTY = "Source"
 TELEGRAM_CHAT_ID_PROPERTY = "Telegram Chat ID"
 TELEGRAM_MESSAGE_ID_PROPERTY = "Telegram Message ID"
+SOURCE_MESSAGE_URL_PROPERTY = "Source Message URL"
 VOICE_FILE_UNIQUE_ID_PROPERTY = "Voice File Unique ID"
 AUDIO_DURATION_PROPERTY = "Audio Duration"
 AUDIO_FILE_SIZE_PROPERTY = "Audio File Size"
@@ -37,6 +38,7 @@ class NotionSchema:
     source: str
     telegram_chat_id: str
     telegram_message_id: str
+    source_message_url: str
     voice_file_unique_id: str
     audio_duration: str
     audio_file_size: str
@@ -91,6 +93,15 @@ MONTHS_RU = {
 def _today_date() -> str:
     tz = zoneinfo.ZoneInfo(settings.timezone)
     return datetime.now(tz).date().isoformat()  # e.g. "2026-04-09"
+
+
+def _notion_entry_date(entry_date: str | None = None) -> str:
+    if not entry_date:
+        return _today_date()
+    try:
+        return date.fromisoformat(entry_date).isoformat()
+    except ValueError as e:
+        raise RuntimeError(f"Invalid entry date: {entry_date}") from e
 
 
 def _today_label() -> str:
@@ -176,6 +187,9 @@ async def ensure_database_schema(http: httpx.AsyncClient) -> NotionSchema:
     telegram_message_id_property = _ensure_database_property(
         properties, updates, TELEGRAM_MESSAGE_ID_PROPERTY, "number", {"number": {}}
     )
+    source_message_url_property = _ensure_database_property(
+        properties, updates, SOURCE_MESSAGE_URL_PROPERTY, "url", {"url": {}}
+    )
     voice_file_unique_id_property = _ensure_database_property(
         properties, updates, VOICE_FILE_UNIQUE_ID_PROPERTY, "rich_text", {"rich_text": {}}
     )
@@ -205,6 +219,7 @@ async def ensure_database_schema(http: httpx.AsyncClient) -> NotionSchema:
         source=source_property,
         telegram_chat_id=telegram_chat_id_property,
         telegram_message_id=telegram_message_id_property,
+        source_message_url=source_message_url_property,
         voice_file_unique_id=voice_file_unique_id_property,
         audio_duration=audio_duration_property,
         audio_file_size=audio_file_size_property,
@@ -268,6 +283,8 @@ def _metadata_properties(schema: NotionSchema, metadata: dict | None) -> dict:
         properties[schema.telegram_chat_id] = _number_property(metadata["telegram_chat_id"])
     if metadata.get("telegram_message_id") is not None:
         properties[schema.telegram_message_id] = _number_property(metadata["telegram_message_id"])
+    if metadata.get("source_message_url"):
+        properties[schema.source_message_url] = {"url": metadata["source_message_url"]}
     if metadata.get("voice_file_unique_id"):
         properties[schema.voice_file_unique_id] = _rich_text_property(metadata["voice_file_unique_id"])
     if metadata.get("audio_duration") is not None:
@@ -385,19 +402,22 @@ async def create_page(
     entry_text: str,
     entry_tags: list[str],
     metadata: dict | None = None,
+    entry_date: str | None = None,
+    allow_duplicate: bool = False,
 ) -> SaveResult:
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
         schema = await ensure_database_schema(http)
-        duplicate = await _find_duplicate_page(http, schema, metadata)
+        duplicate = None if allow_duplicate else await _find_duplicate_page(http, schema, metadata)
         if duplicate:
             page_id = duplicate["id"]
             await _verify_page_created(http, page_id)
             return SaveResult(page_id=page_id, created=False)
 
+        notion_entry_date = _notion_entry_date(entry_date)
         properties = {
             schema.title: {"title": _rich_text(entry_title)},
-            schema.created: {"date": {"start": _today_date()}},
-            schema.day: {"select": {"name": _today_date()}},
+            schema.created: {"date": {"start": notion_entry_date}},
+            schema.day: {"select": {"name": notion_entry_date}},
             schema.tags: {
                 "multi_select": _combine_tags(None, entry_tags, schema.tags),
             },
@@ -457,6 +477,15 @@ async def save_entry(
     entry_text: str,
     entry_tags: list[str],
     metadata: dict | None = None,
+    entry_date: str | None = None,
+    allow_duplicate: bool = False,
 ) -> SaveResult:
     """Creates and verifies a separate Notion database row for every diary entry."""
-    return await create_page(entry_title, entry_text, entry_tags, metadata)
+    return await create_page(
+        entry_title,
+        entry_text,
+        entry_tags,
+        metadata,
+        entry_date,
+        allow_duplicate=allow_duplicate,
+    )

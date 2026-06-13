@@ -25,6 +25,9 @@ class FormatterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["model"], formatter.settings.openai_formatter_model)
         self.assertEqual(kwargs["max_completion_tokens"], 1024)
         self.assertEqual(kwargs["response_format"], {"type": "json_object"})
+        system_prompt = kwargs["messages"][0]["content"]
+        self.assertIn("исходный текст с минимальной правкой", system_prompt)
+        self.assertIn("не переписывай стиль", system_prompt)
 
 
 class WhisperTests(unittest.IsolatedAsyncioTestCase):

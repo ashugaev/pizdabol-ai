@@ -9,6 +9,7 @@ from typing import Any
 STATE_PATH = Path(os.getenv("BOT_STATE_PATH", ".data/message_state.json"))
 MAX_RETAINED_MESSAGES = 200
 UNPROCESSED_STATUSES = {"received", "processing", "failed"}
+VOICE_DUPLICATE_STATUSES = {"drafted", "saved"}
 
 
 def _now() -> str:
@@ -53,8 +54,21 @@ class StateStore:
     def message_key(self, chat_id: int, message_id: int) -> str:
         return f"{chat_id}:{message_id}"
 
-    def record_text(self, chat_id: int, message_id: int, text: str, date: str | None) -> str:
-        return self._record_message(chat_id, message_id, "text", {"text": text}, date)
+    def record_text(
+        self,
+        chat_id: int,
+        message_id: int,
+        text: str,
+        date: str | None,
+        source_message_url: str | None = None,
+    ) -> str:
+        return self._record_message(
+            chat_id,
+            message_id,
+            "text",
+            {"text": text, "source_message_url": source_message_url},
+            date,
+        )
 
     def record_voice(
         self,
@@ -65,12 +79,14 @@ class StateStore:
         file_unique_id: str | None = None,
         duration: int | None = None,
         file_size: int | None = None,
+        source_message_url: str | None = None,
     ) -> str:
         payload = {
             "file_id": file_id,
             "file_unique_id": file_unique_id,
             "duration": duration,
             "file_size": file_size,
+            "source_message_url": source_message_url,
         }
         return self._record_message(chat_id, message_id, "voice", payload, date)
 
@@ -111,6 +127,16 @@ class StateStore:
     def mark_message_drafted(self, key: str, entry_id: str) -> None:
         self._update_message(key, {"status": "drafted", "entry_id": entry_id, "error": None})
 
+    def mark_message_duplicate_pending(self, key: str, duplicate_key: str) -> None:
+        self._update_message(key, {
+            "status": "duplicate_pending",
+            "duplicate_of": duplicate_key,
+            "error": None,
+        })
+
+    def mark_message_duplicate_confirmed(self, key: str) -> None:
+        self._update_message(key, {"status": "received", "allow_duplicate": True, "error": None})
+
     def mark_message_saved(self, key: str | None) -> None:
         if key:
             self._update_message(key, {"status": "saved", "error": None})
@@ -141,6 +167,47 @@ class StateStore:
             reverse=True,
         )
         return [deepcopy(message) for message in reversed(messages[:limit])]
+
+    def find_duplicate_voice(
+        self,
+        file_unique_id: str | None,
+        duration: int | None = None,
+        file_size: int | None = None,
+        exclude_key: str | None = None,
+    ) -> dict[str, Any] | None:
+        if not file_unique_id:
+            return None
+
+        matches = []
+        for key, message in self.data["messages"].items():
+            if key == exclude_key:
+                continue
+            if message.get("kind") != "voice":
+                continue
+            if message.get("status") not in VOICE_DUPLICATE_STATUSES:
+                continue
+            if message.get("file_unique_id") != file_unique_id:
+                continue
+            if not self._voice_fact_matches(message, "duration", duration):
+                continue
+            if not self._voice_fact_matches(message, "file_size", file_size):
+                continue
+            matches.append(message)
+
+        if not matches:
+            return None
+
+        matches.sort(
+            key=lambda message: (message.get("updated_at") or "", message.get("message_id") or 0),
+            reverse=True,
+        )
+        return deepcopy(matches[0])
+
+    def _voice_fact_matches(self, message: dict[str, Any], field: str, value: int | None) -> bool:
+        stored = message.get(field)
+        if stored is None or value is None:
+            return True
+        return int(stored) == int(value)
 
     def save_draft(self, draft: dict[str, Any]) -> None:
         stored = deepcopy(draft)

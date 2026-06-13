@@ -26,6 +26,7 @@ class StateStoreTests(unittest.TestCase):
                 file_unique_id="voice-unique",
                 duration=42,
                 file_size=1000,
+                source_message_url="tg://openmessage?user_id=123&message_id=10",
             )
             duplicate_key = store.record_voice(123, 10, "file-2", None)
             store.mark_message_processing(key)
@@ -39,6 +40,7 @@ class StateStoreTests(unittest.TestCase):
             self.assertEqual(message["file_unique_id"], "voice-unique")
             self.assertEqual(message["duration"], 42)
             self.assertEqual(message["file_size"], 1000)
+            self.assertEqual(message["source_message_url"], "tg://openmessage?user_id=123&message_id=10")
             self.assertEqual(message["status"], "drafted")
             self.assertEqual(message["entry_id"], "entry-1")
 
@@ -81,3 +83,53 @@ class StateStoreTests(unittest.TestCase):
             self.assertIsNone(store.get_message("123:1"))
             self.assertIsNotNone(store.get_message("123:2"))
             self.assertIsNotNone(store.get_message("123:3"))
+
+    def test_finds_saved_voice_duplicate_by_stable_file_facts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = StateStore(Path(tmpdir) / "state.json")
+            original_key = store.record_voice(
+                123,
+                10,
+                "file-1",
+                "2026-06-04T10:00:00+00:00",
+                file_unique_id="voice-unique",
+                duration=42,
+                file_size=1000,
+            )
+            duplicate_key = store.record_voice(
+                123,
+                11,
+                "file-2",
+                "2026-06-04T10:05:00+00:00",
+                file_unique_id="voice-unique",
+                duration=42,
+                file_size=1000,
+            )
+            store.mark_message_saved(original_key)
+
+            duplicate = store.find_duplicate_voice(
+                "voice-unique",
+                duration=42,
+                file_size=1000,
+                exclude_key=duplicate_key,
+            )
+
+            self.assertEqual(duplicate["key"], original_key)
+
+    def test_duplicate_pending_messages_are_not_replayed_until_confirmed(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = StateStore(Path(tmpdir) / "state.json")
+            key = store.record_voice(
+                123,
+                10,
+                "file-1",
+                "2026-06-04T10:00:00+00:00",
+                file_unique_id="voice-unique",
+            )
+            store.mark_message_duplicate_pending(key, "123:9")
+
+            self.assertEqual(store.recent_unprocessed_messages(limit=10), [])
+            store.mark_message_duplicate_confirmed(key)
+
+            self.assertEqual([message["key"] for message in store.recent_unprocessed_messages(limit=10)], [key])
+            self.assertTrue(store.get_message(key)["allow_duplicate"])
