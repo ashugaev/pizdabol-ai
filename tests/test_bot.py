@@ -3,6 +3,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+from telegram.ext import CommandHandler
+
 os.environ.setdefault("TELEGRAM_TOKEN", "test-token")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("NOTION_TOKEN", "test-notion-token")
@@ -598,6 +600,28 @@ class SaveDraftTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0][3]["source_text_hash"], bot._source_text_hash("Text"))
 
 
+class MainRegistrationTests(unittest.TestCase):
+    def test_main_restricts_all_commands_to_allowed_user(self):
+        fake_app = FakePollingApplication()
+
+        with patch.object(bot, "ApplicationBuilder", return_value=FakeApplicationBuilder(fake_app)):
+            bot.main()
+
+        command_handlers = [
+            handler for handler in fake_app.handlers
+            if isinstance(handler, CommandHandler)
+        ]
+        command_filters = {
+            next(iter(handler.commands)): handler.filters
+            for handler in command_handlers
+        }
+
+        self.assertEqual(set(command_filters), {"start", "help", "weekly"})
+        for command, command_filter in command_filters.items():
+            with self.subTest(command=command):
+                self.assertEqual(command_filter.user_ids, frozenset({bot.settings.allowed_user_id}))
+
+
 class FakeSendBot:
     def __init__(self):
         self.sent_messages = []
@@ -648,6 +672,50 @@ class FakeApplication:
         self.created_tasks.append((coroutine, kwargs))
         if self.close_coroutines:
             coroutine.close()
+
+
+class FakePollingApplication:
+    def __init__(self):
+        self.handlers = []
+        self.job_queue = FakeJobQueue()
+        self.polling_started = False
+
+    def add_handler(self, handler):
+        self.handlers.append(handler)
+
+    def run_polling(self):
+        self.polling_started = True
+
+
+class FakeJobQueue:
+    def __init__(self):
+        self.daily_jobs = []
+
+    def run_daily(self, *args, **kwargs):
+        self.daily_jobs.append((args, kwargs))
+
+
+class FakeApplicationBuilder:
+    def __init__(self, app):
+        self.app = app
+        self.token_value = None
+        self.concurrent_updates_value = None
+        self.post_init_callback = None
+
+    def token(self, value):
+        self.token_value = value
+        return self
+
+    def concurrent_updates(self, value):
+        self.concurrent_updates_value = value
+        return self
+
+    def post_init(self, callback):
+        self.post_init_callback = callback
+        return self
+
+    def build(self):
+        return self.app
 
 
 class FakeStateStore:
