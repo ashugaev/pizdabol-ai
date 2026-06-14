@@ -2,7 +2,7 @@ import json
 import httpx
 import openai
 from config import settings
-from services.notion import API, HEADERS, get_today_page, get_week_pages
+from services.notion import API, HEADERS, NOTION_TIMEOUT, extract_page_title, get_today_pages, get_week_pages
 
 openai_client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
 
@@ -15,7 +15,7 @@ Do not use bullet points — write as a short paragraph."""
 
 async def _fetch_page_text(page_id: str) -> str:
     """Fetches all text blocks from a Notion page and returns them as plain text."""
-    async with httpx.AsyncClient() as http:
+    async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
         resp = await http.get(
             f"{API}/blocks/{page_id}/children",
             headers=HEADERS,
@@ -53,8 +53,7 @@ async def generate_weekly_report() -> str | None:
 
     sections = []
     for page in pages:
-        title_prop = page["properties"].get("title") or page["properties"].get("Name")
-        page_title = "".join(p["plain_text"] for p in title_prop.get("title", []))
+        page_title = extract_page_title(page)
         page_text = await _fetch_page_text(page["id"])
         if page_text.strip():
             sections.append(f"### {page_title}\n{page_text}")
@@ -64,8 +63,8 @@ async def generate_weekly_report() -> str | None:
 
     full_text = "\n\n".join(sections)
     response = await openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        max_tokens=1024,
+        model=settings.openai_summary_model,
+        max_completion_tokens=1024,
         messages=[
             {"role": "system", "content": WEEKLY_PROMPT},
             {"role": "user", "content": full_text},
@@ -75,21 +74,29 @@ async def generate_weekly_report() -> str | None:
 
 
 async def generate_daily_summary() -> str | None:
-    """Generates a GPT summary of today's diary page. Returns None if no page exists."""
-    page = await get_today_page()
-    if not page:
+    """Generates a GPT summary of today's diary entries. Returns None if no entries exist."""
+    pages = await get_today_pages()
+    if not pages:
         return None
 
-    page_text = await _fetch_page_text(page["id"])
-    if not page_text.strip():
+    sections = []
+    for page in pages:
+        page_title = extract_page_title(page)
+        page_text = await _fetch_page_text(page["id"])
+        if page_text.strip():
+            sections.append(f"### {page_title}\n{page_text}")
+
+    if not sections:
         return None
+
+    full_text = "\n\n".join(sections)
 
     response = await openai_client.chat.completions.create(
-        model="gpt-4o-mini",
-        max_tokens=512,
+        model=settings.openai_summary_model,
+        max_completion_tokens=512,
         messages=[
             {"role": "system", "content": SUMMARY_PROMPT},
-            {"role": "user", "content": page_text},
+            {"role": "user", "content": full_text},
         ],
     )
     return response.choices[0].message.content

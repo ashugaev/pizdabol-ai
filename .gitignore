@@ -1,4 +1,6 @@
 .env
 .venv/
+.data/
+spur.yaml
 __pycache__/
 *.pyc
