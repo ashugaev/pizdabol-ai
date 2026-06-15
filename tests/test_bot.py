@@ -35,8 +35,24 @@ class PreviewRenderingTests(unittest.TestCase):
 
         self.assertLessEqual(len(preview), bot.TELEGRAM_MESSAGE_LIMIT)
         self.assertIn("Preview truncated", preview)
+        self.assertIn("Page 1/", preview)
         self.assertIn("Full text is kept", preview)
         self.assertNotEqual(preview, body)
+
+    def test_preview_text_can_render_later_truncated_pages(self):
+        entry_date = bot._default_entry_date()
+        body = "\n".join(f"line {i:03d} " + "x" * 80 for i in range(120))
+
+        first_page = bot._render_preview("Long voice transcript", body, [], entry_date, page=0)
+        second_page = bot._render_preview("Long voice transcript", body, [], entry_date, page=1)
+
+        self.assertTrue(first_page.truncated)
+        self.assertGreater(first_page.page_count, 1)
+        self.assertEqual(second_page.page, 1)
+        self.assertEqual(second_page.page_count, first_page.page_count)
+        self.assertLessEqual(len(second_page.text), bot.TELEGRAM_MESSAGE_LIMIT)
+        self.assertIn(f"Page 2/{second_page.page_count}", second_page.text)
+        self.assertNotEqual(first_page.text, second_page.text)
 
     def test_preview_keyboard_scopes_every_callback_to_entry_id(self):
         keyboard = bot._preview_keyboard(
@@ -63,6 +79,25 @@ class PreviewRenderingTests(unittest.TestCase):
                 "save:entry-1",
                 "cancel:entry-1",
             ],
+        )
+
+    def test_preview_keyboard_adds_top_pagination_row_only_when_truncated(self):
+        keyboard = bot._preview_keyboard(
+            "entry-1",
+            entry_date=bot._default_entry_date(),
+            show_pagination=True,
+            preview_page=1,
+            page_count=3,
+        )
+        callback_data = [
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
+
+        self.assertEqual(
+            callback_data[:2],
+            ["preview_page:entry-1:0", "preview_page:entry-1:2"],
         )
 
     def test_date_picker_keyboard_lists_last_seven_days_with_exit_paths(self):
@@ -327,11 +362,20 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
             )
 
         edit_text = fake_context.bot.edits[0]["text"]
+        keyboard = fake_context.bot.edits[0]["reply_markup"]
+        callback_data = [
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
         self.assertLessEqual(len(edit_text), bot.TELEGRAM_MESSAGE_LIMIT)
         self.assertIn("Preview truncated", edit_text)
+        self.assertIn("Page 1/", edit_text)
+        self.assertEqual(callback_data[:2], ["preview_page:entry-long:0", "preview_page:entry-long:1"])
         self.assertEqual(fake_state_store.saved_drafts[0]["text"], long_text)
         self.assertEqual(fake_state_store.saved_drafts[0]["raw_text"], long_text)
         self.assertEqual(fake_state_store.saved_drafts[0]["formatted_text"], "Formatted")
+        self.assertEqual(fake_state_store.saved_drafts[0]["preview_page"], 0)
 
     async def test_create_preview_hides_format_when_formatted_text_matches_raw_text(self):
         fake_state_store = FakeStateStore()
@@ -550,6 +594,32 @@ class DatePickerFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(draft["entry_date"], selected_date)
         self.assertEqual(fake_state_store.saved_drafts[-1]["entry_date"], selected_date)
         self.assertEqual(fake_context.bot.edits[0]["text"], bot._preview_text("Title", "Text", ["work"], selected_date))
+
+
+class PreviewPageFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_set_preview_page_persists_and_edits_same_preview_message(self):
+        fake_state_store = FakeStateStore()
+        fake_context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        entry_date = bot._default_entry_date()
+        draft = {
+            "id": "entry-1",
+            "title": "Title",
+            "text": "\n".join(f"line {i:03d} " + "x" * 80 for i in range(120)),
+            "tags": ["work"],
+            "chat_id": 123,
+            "preview_msg_id": 20,
+            "entry_date": entry_date,
+            "preview_page": 0,
+        }
+        update = SimpleNamespace(callback_query=SimpleNamespace(data="preview_page:entry-1:1"))
+
+        with patch.object(bot, "state_store", fake_state_store):
+            await bot._set_preview_page(update, fake_context, draft)
+
+        self.assertEqual(draft["preview_page"], 1)
+        self.assertEqual(fake_state_store.saved_drafts[-1]["preview_page"], 1)
+        self.assertEqual(fake_context.bot.edits[0]["message_id"], 20)
+        self.assertIn("Page 2/", fake_context.bot.edits[0]["text"])
 
 
 class CancelDraftTests(unittest.IsolatedAsyncioTestCase):
