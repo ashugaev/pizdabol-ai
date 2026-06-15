@@ -5,6 +5,7 @@ import tempfile
 import uuid
 import zoneinfo
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from html import escape
 from types import SimpleNamespace
@@ -43,6 +44,14 @@ STARTUP_REPLAY_LIMIT = 10
 DATE_PICKER_DAYS = 7
 TELEGRAM_MESSAGE_LIMIT = 4096
 SOURCE_DEEPLINK_PREFIX = "src_"
+
+
+@dataclass(frozen=True)
+class PreviewRender:
+    text: str
+    page: int = 0
+    page_count: int = 1
+    truncated: bool = False
 
 WELCOME_TEXT = """👋 Welcome to Noter!
 
@@ -135,35 +144,77 @@ def _compose_preview_text(
     return "\n\n".join(parts)
 
 
-def _preview_text(title: str, text: str, tags: list[str], entry_date: str | None = None) -> str:
-    preview = _compose_preview_text(title, escape(text), tags, entry_date)
-    if len(preview) <= TELEGRAM_MESSAGE_LIMIT:
-        return preview
+def _preview_truncation_notice(page: int, page_count: int) -> str:
+    return (
+        f"\n\n<code>Preview truncated. Page {page + 1}/{page_count}. "
+        "Full text is kept for Save/Edit/Format.</code>"
+    )
 
-    def truncated_preview(text_length: int) -> str:
-        omitted = max(0, len(text) - text_length)
-        notice = (
-            f"\n\n<code>Preview truncated: {omitted} characters hidden. "
-            "Full text is kept for Save/Edit/Format.</code>"
-        )
-        escaped_body = f"{escape(text[:text_length].rstrip())}{notice}"
-        return _compose_preview_text(title, escaped_body, tags, entry_date)
 
+def _preview_page_candidate(
+    title: str,
+    text: str,
+    tags: list[str],
+    entry_date: str | None,
+    start: int,
+    text_length: int,
+    page: int,
+    page_count: int,
+) -> str:
+    page_text = escape(text[start:start + text_length]) + _preview_truncation_notice(page, page_count)
+    return _compose_preview_text(title, page_text, tags, entry_date)
+
+
+def _fit_preview_page_length(
+    title: str,
+    text: str,
+    tags: list[str],
+    entry_date: str | None,
+    start: int,
+    page: int,
+    page_count: int,
+) -> int:
     low = 0
-    high = len(text)
-    best = truncated_preview(0)
+    high = len(text) - start
+    best = -1
     while low <= high:
         mid = (low + high) // 2
-        candidate = truncated_preview(mid)
+        candidate = _preview_page_candidate(title, text, tags, entry_date, start, mid, page, page_count)
         if len(candidate) <= TELEGRAM_MESSAGE_LIMIT:
-            best = candidate
+            best = mid
             low = mid + 1
         else:
             high = mid - 1
+    return best
 
-    if len(best) <= TELEGRAM_MESSAGE_LIMIT:
-        return best
 
+def _preview_page_slices(
+    title: str,
+    text: str,
+    tags: list[str],
+    entry_date: str | None,
+    page_count_hint: int,
+) -> list[tuple[int, int]]:
+    slices = []
+    start = 0
+    while start < len(text):
+        text_length = _fit_preview_page_length(
+            title,
+            text,
+            tags,
+            entry_date,
+            start,
+            len(slices),
+            page_count_hint,
+        )
+        if text_length <= 0:
+            return []
+        slices.append((start, text_length))
+        start += text_length
+    return slices
+
+
+def _fallback_preview_text(title: str, entry_date: str | None) -> str:
     fallback = _compose_preview_text(
         title[:256],
         "<code>Preview is too long for Telegram. Full text is kept for Save/Edit/Format.</code>",
@@ -171,6 +222,65 @@ def _preview_text(title: str, text: str, tags: list[str], entry_date: str | None
         entry_date,
     )
     return fallback[:TELEGRAM_MESSAGE_LIMIT]
+
+
+def _render_preview(
+    title: str,
+    text: str,
+    tags: list[str],
+    entry_date: str | None = None,
+    page: int = 0,
+) -> PreviewRender:
+    preview = _compose_preview_text(title, escape(text), tags, entry_date)
+    if len(preview) <= TELEGRAM_MESSAGE_LIMIT:
+        return PreviewRender(preview)
+
+    page_count_hint = 1
+    page_slices = []
+    for _ in range(10):
+        page_slices = _preview_page_slices(title, text, tags, entry_date, page_count_hint)
+        if not page_slices:
+            return PreviewRender(
+                _fallback_preview_text(title, entry_date),
+                page=0,
+                page_count=1,
+                truncated=True,
+            )
+        if len(page_slices) == page_count_hint:
+            break
+        page_count_hint = len(page_slices)
+
+    page_count = len(page_slices)
+    normalized_page = min(max(page, 0), page_count - 1)
+    start, text_length = page_slices[normalized_page]
+    page_text = _preview_page_candidate(
+        title,
+        text,
+        tags,
+        entry_date,
+        start,
+        text_length,
+        normalized_page,
+        page_count,
+    )
+    if len(page_text) > TELEGRAM_MESSAGE_LIMIT:
+        return PreviewRender(
+            _fallback_preview_text(title, entry_date),
+            page=0,
+            page_count=1,
+            truncated=True,
+        )
+    return PreviewRender(page_text, page=normalized_page, page_count=page_count, truncated=True)
+
+
+def _preview_text(
+    title: str,
+    text: str,
+    tags: list[str],
+    entry_date: str | None = None,
+    page: int = 0,
+) -> str:
+    return _render_preview(title, text, tags, entry_date, page).text
 
 
 def _preview_msg_id(draft: dict) -> int:
@@ -333,19 +443,30 @@ def _preview_keyboard(
     highlighted: bool = False,
     entry_date: str | None = None,
     show_format: bool = False,
+    show_pagination: bool = False,
+    preview_page: int = 0,
+    page_count: int = 1,
 ) -> InlineKeyboardMarkup:
     highlight_btn = (
         InlineKeyboardButton("⭐ Highlighted", callback_data=f"toggle_highlight:{entry_id}")
         if highlighted else
         InlineKeyboardButton("Mark as Highlight ⭐", callback_data=f"toggle_highlight:{entry_id}")
     )
-    rows = [
+    rows = []
+    if show_pagination and page_count > 1:
+        previous_page = max(preview_page - 1, 0)
+        next_page = min(preview_page + 1, page_count - 1)
+        rows.append([
+            InlineKeyboardButton("←", callback_data=f"preview_page:{entry_id}:{previous_page}"),
+            InlineKeyboardButton("→", callback_data=f"preview_page:{entry_id}:{next_page}"),
+        ])
+    rows.append(
         [
             InlineKeyboardButton("✎ Title", callback_data=f"edit_title:{entry_id}"),
             InlineKeyboardButton("✎ Text", callback_data=f"edit_text:{entry_id}"),
             InlineKeyboardButton("✎ Tags", callback_data=f"edit_tags:{entry_id}"),
         ],
-    ]
+    )
     if show_format:
         rows.append([InlineKeyboardButton("✦ Format", callback_data=f"format:{entry_id}")])
     rows.extend([
@@ -403,7 +524,25 @@ def _draft_highlighted(draft: dict) -> bool:
     return draft["title"].startswith("⭐ ")
 
 
-def _preview_keyboard_for_draft(draft: dict) -> InlineKeyboardMarkup:
+def _draft_preview_page(draft: dict) -> int:
+    try:
+        return max(0, int(draft.get("preview_page", 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _render_preview_for_draft(draft: dict) -> PreviewRender:
+    return _render_preview(
+        draft["title"],
+        draft["text"],
+        draft["tags"],
+        draft.get("entry_date"),
+        _draft_preview_page(draft),
+    )
+
+
+def _preview_keyboard_for_draft(draft: dict, preview: PreviewRender | None = None) -> InlineKeyboardMarkup:
+    preview = preview or _render_preview_for_draft(draft)
     return _preview_keyboard(
         draft["id"],
         highlighted=_draft_highlighted(draft),
@@ -413,6 +552,9 @@ def _preview_keyboard_for_draft(draft: dict) -> InlineKeyboardMarkup:
             and not draft.get("formatted")
             and draft.get("formatted_text") != draft.get("text")
         ),
+        show_pagination=preview.truncated,
+        preview_page=preview.page,
+        page_count=preview.page_count,
     )
 
 
@@ -703,26 +845,29 @@ async def _create_preview(
     title, formatted_text, tags = await format_entry(source_text)
     text = source_text
 
-    preview = _preview_text(title, text, tags, entry_date)
+    preview = _render_preview(title, text, tags, entry_date)
     keyboard = _preview_keyboard(
         entry_id,
         highlighted=False,
         entry_date=entry_date,
         show_format=bool(formatted_text) and formatted_text != text,
+        show_pagination=preview.truncated,
+        preview_page=preview.page,
+        page_count=preview.page_count,
     )
     if preview_message:
         preview_msg = preview_message
         await _edit_reply_message(
             context,
             preview_msg,
-            preview,
+            preview.text,
             parse_mode="HTML",
             reply_markup=keyboard,
         )
     else:
         preview_msg = await _reply_to_source(
             message,
-            preview,
+            preview.text,
             parse_mode="HTML",
             reply_markup=keyboard,
         )
@@ -740,6 +885,7 @@ async def _create_preview(
         "allow_duplicate": bool(record and record.get("allow_duplicate")),
         "chat_id": message.chat_id,
         "preview_msg_id": preview_msg.message_id,
+        "preview_page": preview.page,
         "saving": False,
         "message_key": message_key,
     }
@@ -790,6 +936,8 @@ async def entry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _cancel_draft(query, context, entry_id, draft)
     elif action == "toggle_highlight":
         await _toggle_highlight(context, draft)
+    elif action == "preview_page":
+        await _set_preview_page(update, context, draft)
     elif action == "pick_date":
         await _show_date_picker(query, draft)
     elif action == "back_to_preview":
@@ -949,6 +1097,7 @@ async def _format_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) 
 
     draft["text"] = formatted_text
     draft["formatted"] = True
+    draft["preview_page"] = 0
     state_store.save_draft(draft)
     await _edit_preview(context, draft)
 
@@ -972,14 +1121,29 @@ async def _toggle_highlight(context: ContextTypes.DEFAULT_TYPE, draft: dict) -> 
 
 
 async def _edit_preview(context: ContextTypes.DEFAULT_TYPE, draft: dict) -> None:
+    previous_entry_date = draft.get("entry_date")
+    previous_preview_page = draft.get("preview_page")
     draft["entry_date"] = _normalize_entry_date(draft.get("entry_date"))
+    preview = _render_preview_for_draft(draft)
+    draft["preview_page"] = preview.page
+    if previous_entry_date != draft["entry_date"] or previous_preview_page != preview.page:
+        state_store.save_draft(draft)
     await context.bot.edit_message_text(
         chat_id=draft["chat_id"],
         message_id=_preview_msg_id(draft),
-        text=_preview_text(draft["title"], draft["text"], draft["tags"], draft["entry_date"]),
+        text=preview.text,
         parse_mode="HTML",
-        reply_markup=_preview_keyboard_for_draft(draft),
+        reply_markup=_preview_keyboard_for_draft(draft, preview),
     )
+
+
+async def _set_preview_page(update: Update, context: ContextTypes.DEFAULT_TYPE, draft: dict) -> None:
+    try:
+        draft["preview_page"] = int(_callback_value(update) or 0)
+    except ValueError:
+        draft["preview_page"] = 0
+    state_store.save_draft(draft)
+    await _edit_preview(context, draft)
 
 
 async def _show_date_picker(query, draft: dict) -> None:
@@ -1050,6 +1214,7 @@ async def receive_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             draft["raw_text"] = draft["text"]
     elif field == "tags":
         draft["tags"] = [t.strip() for t in user_msg.text.split(",") if t.strip()]
+    draft["preview_page"] = 0
 
     state_store.save_draft(draft)
     await _edit_preview(context, draft)
@@ -1150,7 +1315,7 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(
             entry_callback,
-            pattern="^(save|save_anyway|format|cancel|toggle_highlight|pick_date|set_date|back_to_preview|edit_title|edit_text|edit_tags):",
+            pattern="^(save|save_anyway|format|cancel|toggle_highlight|preview_page|pick_date|set_date|back_to_preview|edit_title|edit_text|edit_tags):",
         )
     )
 
