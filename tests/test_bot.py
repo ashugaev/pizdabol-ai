@@ -89,6 +89,16 @@ class PreviewRenderingTests(unittest.TestCase):
 
         self.assertEqual(callback_data, ["add_duplicate:123:10", "cancel_duplicate:123:10"])
 
+    def test_retry_processing_keyboard_scopes_action_to_message_key(self):
+        keyboard = bot._retry_processing_keyboard("123:10")
+        callback_data = [
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
+
+        self.assertEqual(callback_data, ["retry_process:123:10"])
+
     def test_callback_payload_parses_action_and_entry_id(self):
         update = SimpleNamespace(callback_query=SimpleNamespace(data="save:entry-1"))
 
@@ -323,6 +333,34 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_state_store.saved_drafts[0]["raw_text"], long_text)
         self.assertEqual(fake_state_store.saved_drafts[0]["formatted_text"], "Formatted")
 
+    async def test_create_preview_hides_format_when_formatted_text_matches_raw_text(self):
+        fake_state_store = FakeStateStore()
+        fake_context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        source_message = SimpleNamespace(chat_id=123, message_id=10)
+        processing_message = SimpleNamespace(chat_id=123, message_id=20)
+        fake_formatter = AsyncMock(return_value=("Title", "raw transcription", []))
+
+        with (
+            patch.object(bot, "format_entry", new=fake_formatter),
+            patch.object(bot, "_new_entry_id", return_value="entry-raw"),
+            patch.object(bot, "state_store", fake_state_store),
+        ):
+            await bot._create_preview(
+                source_message,
+                fake_context,
+                "raw transcription",
+                message_key="123:10",
+                preview_message=processing_message,
+            )
+
+        keyboard = fake_context.bot.edits[0]["reply_markup"]
+        callback_data = [
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
+        self.assertNotIn("format:entry-raw", callback_data)
+
 
 class DuplicateVoiceFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_handle_voice_warns_and_waits_when_voice_was_already_saved(self):
@@ -382,6 +420,73 @@ class DuplicateVoiceFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_state_store.marked_duplicate_confirmed, ["123:11"])
         self.assertEqual(fake_query.edits[0]["text"], "Adding this voice message anyway...")
         self.assertEqual(len(fake_context.application.created_tasks), 1)
+
+
+class RetryProcessingFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_failed_text_processing_shows_retry_button(self):
+        fake_state_store = FakeStateStore()
+        fake_state_store.messages["123:10"] = {
+            "key": "123:10",
+            "kind": "text",
+            "chat_id": 123,
+            "message_id": 10,
+            "text": "raw text",
+        }
+        fake_context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        status_message = SimpleNamespace(chat_id=123, message_id=20)
+
+        with (
+            patch.object(bot, "format_entry", new=AsyncMock(side_effect=RuntimeError("formatter failed"))),
+            patch.object(bot, "state_store", fake_state_store),
+            patch.object(bot.logger, "exception"),
+        ):
+            await bot._process_text_record(
+                fake_state_store.messages["123:10"],
+                SimpleNamespace(chat_id=123, message_id=10),
+                fake_context,
+                status_message=status_message,
+            )
+
+        self.assertEqual(fake_state_store.marked_failed, [("123:10", "formatter failed")])
+        self.assertEqual(fake_context.bot.edits[0]["text"], "Preparing preview...")
+        self.assertIn("Error: formatter failed", fake_context.bot.edits[1]["text"])
+        keyboard = fake_context.bot.edits[1]["reply_markup"]
+        self.assertEqual(keyboard.inline_keyboard[0][0].callback_data, "retry_process:123:10")
+
+    async def test_retry_processing_callback_restarts_message_processing(self):
+        fake_state_store = FakeStateStore()
+        fake_state_store.messages["123:10"] = {
+            "key": "123:10",
+            "kind": "text",
+            "status": "failed",
+            "chat_id": 123,
+            "message_id": 10,
+            "text": "raw text",
+        }
+        fake_context = SimpleNamespace(
+            bot=FakeSendBot(),
+            application=FakeApplication(close_coroutines=True),
+            user_data={},
+        )
+        fake_query = FakeQuery(data="retry_process:123:10")
+        update = SimpleNamespace(callback_query=fake_query)
+        fake_processor = AsyncMock()
+
+        with (
+            patch.object(bot, "state_store", fake_state_store),
+            patch.object(bot, "_process_message_record", new=fake_processor),
+        ):
+            await bot.retry_processing_callback(update, fake_context)
+
+        self.assertEqual(fake_query.edits[0]["text"], "Retrying...")
+        self.assertEqual(len(fake_context.application.created_tasks), 1)
+        fake_processor.assert_called_once()
+        args, kwargs = fake_processor.call_args
+        self.assertEqual(args[0], "123:10")
+        self.assertEqual(args[1].chat_id, 123)
+        self.assertEqual(args[1].message_id, 10)
+        self.assertIs(args[2], fake_context)
+        self.assertIs(kwargs["status_message"], fake_query.message)
 
 
 class FormatDraftFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -654,7 +759,7 @@ class FakeQuery:
     def __init__(self, data=None):
         self.edits = []
         self.data = data
-        self.message = SimpleNamespace(reply_text=AsyncMock())
+        self.message = SimpleNamespace(chat_id=123, message_id=20, reply_text=AsyncMock())
 
     async def answer(self):
         pass
@@ -722,6 +827,8 @@ class FakeStateStore:
     def __init__(self):
         self.messages = {}
         self.saved_drafts = []
+        self.marked_processing = []
+        self.marked_failed = []
         self.marked_drafted = []
         self.marked_cancelled = []
         self.marked_duplicate_pending = []
@@ -764,6 +871,15 @@ class FakeStateStore:
 
     def save_draft(self, draft):
         self.saved_drafts.append(dict(draft))
+
+    def mark_message_processing(self, key):
+        self.marked_processing.append(key)
+        self.messages[key]["status"] = "processing"
+
+    def mark_message_failed(self, key, error):
+        self.marked_failed.append((key, error))
+        self.messages[key]["status"] = "failed"
+        self.messages[key]["error"] = error
 
     def mark_message_drafted(self, key, entry_id):
         self.marked_drafted.append((key, entry_id))
