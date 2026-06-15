@@ -387,6 +387,12 @@ def _duplicate_save_keyboard(entry_id: str) -> InlineKeyboardMarkup:
     ])
 
 
+def _retry_processing_keyboard(message_key: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("Retry", callback_data=f"retry_process:{message_key}")],
+    ])
+
+
 def _duplicate_warning_text(metadata: dict | None) -> str:
     if metadata and metadata.get("source") == "voice":
         return "This voice message has already been added.\n\nAdd it again anyway?"
@@ -402,7 +408,11 @@ def _preview_keyboard_for_draft(draft: dict) -> InlineKeyboardMarkup:
         draft["id"],
         highlighted=_draft_highlighted(draft),
         entry_date=draft.get("entry_date"),
-        show_format=bool(draft.get("formatted_text")) and not draft.get("formatted"),
+        show_format=(
+            bool(draft.get("formatted_text"))
+            and not draft.get("formatted")
+            and draft.get("formatted_text") != draft.get("text")
+        ),
     )
 
 
@@ -561,6 +571,7 @@ async def _process_message_record(
     message_key: str,
     message_ref,
     context: ContextTypes.DEFAULT_TYPE,
+    status_message=None,
 ) -> None:
     record = state_store.get_message(message_key)
     if not record or record.get("status") in {"drafted", "saved"}:
@@ -568,20 +579,24 @@ async def _process_message_record(
 
     state_store.mark_message_processing(message_key)
     if record["kind"] == "voice":
-        await _process_voice_record(record, message_ref, context)
+        await _process_voice_record(record, message_ref, context, status_message=status_message)
     elif record["kind"] == "text":
-        await _process_text_record(record, message_ref, context)
+        await _process_text_record(record, message_ref, context, status_message=status_message)
 
 
 async def _process_voice_record(
     record: dict[str, Any],
     message_ref,
     context: ContextTypes.DEFAULT_TYPE,
+    status_message=None,
 ) -> None:
     tmp_path = None
-    status_msg = None
+    status_msg = status_message
     try:
-        status_msg = await _reply_to_source(message_ref, "Listening...")
+        if status_msg:
+            await _edit_reply_message(context, status_msg, "Listening...")
+        else:
+            status_msg = await _reply_to_source(message_ref, "Listening...")
 
         voice_file = await context.bot.get_file(record["file_id"])
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
@@ -603,7 +618,8 @@ async def _process_voice_record(
             await _edit_reply_message(
                 context,
                 status_msg,
-                f"{settings.openai_transcription_model} did not recognize any speech in this message."
+                f"{settings.openai_transcription_model} did not recognize any speech in this message.",
+                reply_markup=_retry_processing_keyboard(record["key"]),
             )
             return
 
@@ -619,9 +635,18 @@ async def _process_voice_record(
         logger.exception("Error processing voice message")
         state_store.mark_message_failed(record["key"], str(e))
         if status_msg:
-            await _edit_reply_message(context, status_msg, f"Error: {e}")
+            await _edit_reply_message(
+                context,
+                status_msg,
+                f"Error: {e}",
+                reply_markup=_retry_processing_keyboard(record["key"]),
+            )
         else:
-            await _reply_to_source(message_ref, f"Error: {e}")
+            await _reply_to_source(
+                message_ref,
+                f"Error: {e}",
+                reply_markup=_retry_processing_keyboard(record["key"]),
+            )
     finally:
         if tmp_path:
             with suppress(FileNotFoundError):
@@ -632,10 +657,14 @@ async def _process_text_record(
     record: dict[str, Any],
     message_ref,
     context: ContextTypes.DEFAULT_TYPE,
+    status_message=None,
 ) -> None:
-    status_msg = None
+    status_msg = status_message
     try:
-        status_msg = await _reply_to_source(message_ref, "Preparing preview...")
+        if status_msg:
+            await _edit_reply_message(context, status_msg, "Preparing preview...")
+        else:
+            status_msg = await _reply_to_source(message_ref, "Preparing preview...")
         await _create_preview(
             message_ref,
             context,
@@ -647,9 +676,18 @@ async def _process_text_record(
         logger.exception("Error processing text message")
         state_store.mark_message_failed(record["key"], str(e))
         if status_msg:
-            await _edit_reply_message(context, status_msg, f"Error: {e}")
+            await _edit_reply_message(
+                context,
+                status_msg,
+                f"Error: {e}",
+                reply_markup=_retry_processing_keyboard(record["key"]),
+            )
         else:
-            await _reply_to_source(message_ref, f"Error: {e}")
+            await _reply_to_source(
+                message_ref,
+                f"Error: {e}",
+                reply_markup=_retry_processing_keyboard(record["key"]),
+            )
 
 
 async def _create_preview(
@@ -666,7 +704,12 @@ async def _create_preview(
     text = source_text
 
     preview = _preview_text(title, text, tags, entry_date)
-    keyboard = _preview_keyboard(entry_id, highlighted=False, entry_date=entry_date, show_format=True)
+    keyboard = _preview_keyboard(
+        entry_id,
+        highlighted=False,
+        entry_date=entry_date,
+        show_format=bool(formatted_text) and formatted_text != text,
+    )
     if preview_message:
         preview_msg = preview_message
         await _edit_reply_message(
@@ -789,6 +832,36 @@ async def duplicate_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
     context.application.create_task(
         _process_message_record(message_key, message_ref, context),
+        update=update,
+    )
+
+
+async def retry_processing_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+    if ":" not in data:
+        await query.message.reply_text("This message is no longer available.")
+        return
+
+    _, message_key = data.split(":", 1)
+    record = state_store.get_message(message_key)
+    if not record or record.get("status") in {"drafted", "saved", "cancelled"}:
+        await query.edit_message_text("This message is no longer available.")
+        return
+    if record.get("status") == "processing":
+        await query.message.reply_text("This message is already processing.")
+        return
+
+    message_ref = StoredMessageRef(
+        context.bot,
+        chat_id=record["chat_id"],
+        message_id=record["message_id"],
+    )
+    await query.edit_message_text("Retrying...")
+    context.application.create_task(
+        _process_message_record(message_key, message_ref, context, status_message=query.message),
         update=update,
     )
 
@@ -1062,6 +1135,12 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.VOICE & user_filter, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.REPLY & user_filter, receive_edit_reply))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & user_filter, handle_text))
+    app.add_handler(
+        CallbackQueryHandler(
+            retry_processing_callback,
+            pattern="^retry_process:",
+        )
+    )
     app.add_handler(
         CallbackQueryHandler(
             duplicate_callback,

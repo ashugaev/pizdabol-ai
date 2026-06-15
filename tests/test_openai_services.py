@@ -29,6 +29,26 @@ class FormatterTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("исходный текст с минимальной правкой", system_prompt)
         self.assertIn("не переписывай стиль", system_prompt)
 
+    async def test_format_entry_uses_metadata_only_for_long_transcription(self):
+        fake_client = FakeChatClient('{"title":"Long Title","tags":["work"]}')
+        raw = "слово " * (formatter.LONG_TRANSCRIPTION_CHAR_LIMIT // 5 + 1)
+
+        with patch.object(formatter, "client", fake_client):
+            result = await formatter.format_entry(raw)
+
+        self.assertEqual(result, ("Long Title", raw, ["work"]))
+        kwargs = fake_client.chat.completions.calls[0]
+        self.assertEqual(kwargs["max_completion_tokens"], formatter.METADATA_MAX_COMPLETION_TOKENS)
+        self.assertIn("Не возвращай полный текст заметки", kwargs["messages"][0]["content"])
+
+    async def test_format_entry_falls_back_when_json_is_truncated(self):
+        fake_client = FakeChatClient('{"title":"Title","text":"unfinished')
+
+        with patch.object(formatter, "client", fake_client):
+            result = await formatter.format_entry("raw transcription text")
+
+        self.assertEqual(result, ("raw transcription text", "raw transcription text", []))
+
 
 class WhisperTests(unittest.IsolatedAsyncioTestCase):
     async def test_transcribe_uses_configured_model_and_russian_language(self):
