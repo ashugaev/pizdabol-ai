@@ -1,0 +1,35 @@
+[features]
+multi_agent = true
+hooks = true
+
+[agents]
+max_threads = 6
+max_depth = 2
+
+[agents.researcher]
+description = "Generate 2-3 implementation options with codebase evidence. Use before critic for ambiguous or cross-module tasks."
+config_file = "agents/researcher.toml"
+
+[agents.critic]
+description = "Evaluate researcher's implementation options. Verify claims, challenge assumptions, score each, select winner."
+config_file = "agents/critic.toml"
+
+[agents.architect]
+description = "Create a concrete implementation plan with touched files, steps, acceptance criteria, risks, and test coverage."
+config_file = "agents/architect.toml"
+
+[agents.developer]
+description = "Implement the architect's plan, update tests/docs, run checks, and report changed files."
+config_file = "agents/developer.toml"
+
+[agents.reviewer]
+description = "Code review gate. Static diff analysis plus local compile/test validation. Returns APPROVED or CHANGES_REQUESTED."
+config_file = "agents/reviewer.toml"
+
+[agents.tester]
+description = "Validation gate for diary-bot. Runs targeted Python tests, compile checks, and offline behavior checks."
+config_file = "agents/tester.toml"
+
+[agents.operator]
+description = "Runtime and deployment gate. Use for Makefile, env, Codex hooks, VPS, systemd, secrets, scheduling, or production-safety changes."
+config_file = "agents/operator.toml"

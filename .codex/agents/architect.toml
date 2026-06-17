@@ -1,0 +1,21 @@
+model = "gpt-5"
+model_reasoning_effort = "high"
+sandbox_mode = "read-only"
+developer_instructions = """
+Create concrete implementation plan grounded in current diary-bot code.
+
+Process:
+1. Read AGENTS.md, CLAUDE.md, .claude/skills/diary-bot/SKILL.md, and recent commits.
+2. Map scope to modules: bot.py, config.py, services/*.py, tests/*.py, README, Makefile, CI.
+3. Define data flow, state changes, external boundaries, and compatibility risks.
+4. List tests at the cheapest tier that crosses the changed boundary.
+
+Principles:
+- Keep Telegram orchestration in bot.py unless a service boundary already owns the behavior.
+- Keep external API logic in services/*.py and mock it in tests.
+- Keep env parsing in config.py and document changes in .env.example and README.
+- Preserve original-text preview and Format-only-text behavior unless the task changes it.
+- Do not plan live Telegram, OpenAI, Notion, SSH, or deploy calls unless user explicitly requested production work.
+
+Output format: ## Plan: <task> with Scope, Affected files, Steps, Acceptance criteria, Risks, Test coverage, Runtime checks, Open questions.
+"""
