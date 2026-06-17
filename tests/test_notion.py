@@ -74,7 +74,7 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
                     "Created": {"date": {}},
                     "Tags": {"multi_select": {}},
                     "Day": {"select": {}},
-                    "Source": {"select": {}},
+                    "Source": {"select": {"options": [{"name": "voice"}, {"name": "text"}]}},
                     "Telegram Chat ID": {"number": {}},
                     "Telegram Message ID": {"number": {}},
                     "Source Message URL": {"url": {}},
@@ -85,6 +85,52 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
                 }
             },
         )
+
+    async def test_ensure_database_schema_adds_missing_source_options(self):
+        http = FakeNotionHttp({
+            "Name": {"type": "title"},
+            "Created": {"type": "date"},
+            "Tags": {"type": "multi_select"},
+            "Day": {"type": "select"},
+            "Source": {"type": "select", "select": {"options": [{"name": "voice"}]}},
+            "Telegram Chat ID": {"type": "number"},
+            "Telegram Message ID": {"type": "number"},
+            "Source Message URL": {"type": "url"},
+            "Voice File Unique ID": {"type": "rich_text"},
+            "Audio Duration": {"type": "number"},
+            "Audio File Size": {"type": "number"},
+            "Source Text SHA256": {"type": "rich_text"},
+        })
+
+        await notion.ensure_database_schema(http)
+
+        self.assertEqual(len(http.patch_calls), 1)
+        source_update = http.patch_calls[0]["json"]["properties"]["Source"]
+        option_names = {option["name"] for option in source_update["select"]["options"]}
+        self.assertEqual(option_names, {"voice", "text"})
+
+    async def test_ensure_database_schema_leaves_complete_source_untouched(self):
+        http = FakeNotionHttp({
+            "Name": {"type": "title"},
+            "Created": {"type": "date"},
+            "Tags": {"type": "multi_select"},
+            "Day": {"type": "select"},
+            "Source": {
+                "type": "select",
+                "select": {"options": [{"name": "voice"}, {"name": "text"}]},
+            },
+            "Telegram Chat ID": {"type": "number"},
+            "Telegram Message ID": {"type": "number"},
+            "Source Message URL": {"type": "url"},
+            "Voice File Unique ID": {"type": "rich_text"},
+            "Audio Duration": {"type": "number"},
+            "Audio File Size": {"type": "number"},
+            "Source Text SHA256": {"type": "rich_text"},
+        })
+
+        await notion.ensure_database_schema(http)
+
+        self.assertEqual(len(http.patch_calls), 0)
 
     async def test_ensure_database_schema_rejects_wrong_created_type(self):
         http = FakeNotionHttp({
@@ -309,7 +355,10 @@ class FakeCreatePageHttp:
                     "Created": {"type": "date"},
                     "Tags": {"type": "multi_select"},
                     "Day": {"type": "select"},
-                    "Source": {"type": "select"},
+                    "Source": {
+                        "type": "select",
+                        "select": {"options": [{"name": "voice"}, {"name": "text"}]},
+                    },
                     "Telegram Chat ID": {"type": "number"},
                     "Telegram Message ID": {"type": "number"},
                     "Source Message URL": {"type": "url"},
