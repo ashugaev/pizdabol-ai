@@ -15,6 +15,7 @@ CREATED_PROPERTY = "Created"
 TAGS_PROPERTY = "Tags"
 DAY_PROPERTY = "Day"
 SOURCE_PROPERTY = "Source"
+SOURCE_OPTIONS = ("voice", "text")
 TELEGRAM_CHAT_ID_PROPERTY = "Telegram Chat ID"
 TELEGRAM_MESSAGE_ID_PROPERTY = "Telegram Message ID"
 SOURCE_MESSAGE_URL_PROPERTY = "Source Message URL"
@@ -163,6 +164,31 @@ def _ensure_database_property(
     return name
 
 
+def _ensure_select_options(
+    properties: dict,
+    updates: dict,
+    name: str,
+    required_options: tuple[str, ...],
+) -> None:
+    """Adds any missing select options so query filters on them don't 400.
+
+    Notion auto-creates select options when writing a page, but rejects query
+    filters that reference an option the database has never seen.
+    """
+    prop = properties.get(name)
+    if not prop or prop.get("type") != "select":
+        return
+    existing = prop.get("select", {}).get("options", [])
+    existing_names = {option["name"] for option in existing}
+    missing = [option for option in required_options if option not in existing_names]
+    if not missing:
+        return
+    merged = [{"name": option_name} for option_name in existing_names | set(missing)]
+    pending = updates.get(name, {})
+    select_body = {**pending.get("select", {}), "options": merged}
+    updates[name] = {**pending, "select": select_body}
+
+
 async def ensure_database_schema(http: httpx.AsyncClient) -> NotionSchema:
     """Ensures the Notion database has the properties this bot writes."""
     properties = await _database_properties(http)
@@ -179,8 +205,13 @@ async def ensure_database_schema(http: httpx.AsyncClient) -> NotionSchema:
         properties, updates, DAY_PROPERTY, "select", {"select": {}}
     )
     source_property = _ensure_database_property(
-        properties, updates, SOURCE_PROPERTY, "select", {"select": {}}
+        properties,
+        updates,
+        SOURCE_PROPERTY,
+        "select",
+        {"select": {"options": [{"name": name} for name in SOURCE_OPTIONS]}},
     )
+    _ensure_select_options(properties, updates, source_property, SOURCE_OPTIONS)
     telegram_chat_id_property = _ensure_database_property(
         properties, updates, TELEGRAM_CHAT_ID_PROPERTY, "number", {"number": {}}
     )
