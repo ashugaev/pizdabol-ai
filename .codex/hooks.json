@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".codex/hooks/project-check.sh",
+            "statusMessage": "Running local Codex project checks...",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
