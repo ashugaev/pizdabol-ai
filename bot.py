@@ -23,6 +23,7 @@ from telegram.ext import (
 )
 
 from config import settings
+from services.diary_dates import diary_today
 from services.formatter import format_entry
 from services.notion import save_entry
 from services.state_store import state_store
@@ -97,8 +98,7 @@ def _tags_html(tags: list[str]) -> str:
 
 
 def _local_today() -> date:
-    tz = zoneinfo.ZoneInfo(settings.timezone)
-    return datetime.now(tz).date()
+    return diary_today()
 
 
 def _entry_date_options() -> list[str]:

@@ -1,9 +1,9 @@
 import asyncio
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-import zoneinfo
+from datetime import date, timedelta
 import httpx
 from config import settings
+from services.diary_dates import diary_today
 
 API = "https://api.notion.com/v1"
 NOTION_TIMEOUT = 30
@@ -92,8 +92,7 @@ MONTHS_RU = {
 
 
 def _today_date() -> str:
-    tz = zoneinfo.ZoneInfo(settings.timezone)
-    return datetime.now(tz).date().isoformat()  # e.g. "2026-04-09"
+    return diary_today().isoformat()  # e.g. "2026-04-09"
 
 
 def _notion_entry_date(entry_date: str | None = None) -> str:
@@ -106,9 +105,8 @@ def _notion_entry_date(entry_date: str | None = None) -> str:
 
 
 def _today_label() -> str:
-    tz = zoneinfo.ZoneInfo(settings.timezone)
-    now = datetime.now(tz)
-    return f"{now.day} {MONTHS_RU[now.month]}"
+    today = diary_today()
+    return f"{today.day} {MONTHS_RU[today.month]}"
 
 
 def extract_page_title(page: dict) -> str:
@@ -481,8 +479,7 @@ async def create_page(
 
 async def get_week_pages() -> list[dict]:
     """Returns all diary pages created in the last 7 days, oldest first."""
-    tz = zoneinfo.ZoneInfo(settings.timezone)
-    today = datetime.now(tz).date()
+    today = diary_today()
     week_ago = today - timedelta(days=6)
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
         schema = await ensure_database_schema(http)

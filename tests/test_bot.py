@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -113,6 +114,22 @@ class PreviewRenderingTests(unittest.TestCase):
             [f"set_date:entry-1:{entry_date}" for entry_date in bot._entry_date_options()],
         )
         self.assertEqual(callback_data[-2:], ["back_to_preview:entry-1", "cancel:entry-1"])
+
+    def test_entry_date_options_use_configured_diary_day(self):
+        with patch.object(bot, "diary_today", return_value=date(2026, 6, 21)):
+            self.assertEqual(bot._default_entry_date(), "2026-06-21")
+            self.assertEqual(
+                bot._entry_date_options(),
+                [
+                    "2026-06-21",
+                    "2026-06-20",
+                    "2026-06-19",
+                    "2026-06-18",
+                    "2026-06-17",
+                    "2026-06-16",
+                    "2026-06-15",
+                ],
+            )
 
     def test_duplicate_voice_keyboard_scopes_actions_to_message_key(self):
         keyboard = bot._duplicate_voice_keyboard("123:10")
