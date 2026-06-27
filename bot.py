@@ -28,6 +28,7 @@ from services.diary_dates import diary_today
 from services.formatter import format_entry
 from services.notion import save_entry
 from services.state_store import state_store
+from services.stats import build_audio_stats, format_audio_stats
 from services.summary import generate_daily_summary, generate_weekly_report
 from services.whisper import transcribe
 
@@ -68,6 +69,7 @@ Send me a voice or text message and I'll:
 • Save it to your Notion journal
 
 Every day at 21:00 I'll send you a summary of the day.
+Use /stat to see your saved audio minutes.
 
 Type /help to see detailed instructions."""
 
@@ -91,7 +93,10 @@ HELP_TEXT = """*How to use Noter*
 *Date* — choose today or one of the previous 6 days
 
 *Daily summary*
-Every day at 21:00 I send a summary of all entries recorded that day. If there are none, I'll send a friendly nudge instead."""
+Every day at 21:00 I send a summary of all entries recorded that day. If there are none, I'll send a friendly nudge instead.
+
+*Stats*
+*/stat* — show total saved audio minutes, daily stats for the last 7 days, and monthly stats for the last 6 months."""
 
 
 def _tags_html(tags: list[str]) -> str:
@@ -1265,6 +1270,19 @@ async def handle_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text("Error generating weekly report.")
 
 
+async def handle_stat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text("Counting saved audio stats...")
+    try:
+        stats = await build_audio_stats()
+        await update.effective_message.reply_text(
+            format_audio_stats(stats),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        logger.exception("Error generating audio stats")
+        await update.effective_message.reply_text("Error generating audio stats.")
+
+
 async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Generating weekly report...")
     try:
@@ -1319,6 +1337,7 @@ def main() -> None:
         CommandHandler("start", handle_start, filters=user_filter),
         CommandHandler("help", handle_help, filters=user_filter),
         CommandHandler("weekly", handle_weekly, filters=user_filter),
+        CommandHandler("stat", handle_stat, filters=user_filter),
     ]
 
     for handler in command_handlers:

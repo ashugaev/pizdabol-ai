@@ -353,7 +353,12 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
         query_payload = http.post_calls[-1]["json"]
         self.assertEqual(
             query_payload["filter"],
-            {"property": "Created", "date": {"equals": "2026-06-21"}},
+            {
+                "and": [
+                    {"property": "Created", "date": {"on_or_after": "2026-06-21"}},
+                    {"property": "Created", "date": {"on_or_before": "2026-06-21"}},
+                ]
+            },
         )
 
     async def test_get_week_pages_uses_configured_diary_day_range(self):
@@ -377,6 +382,34 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
                 ]
             },
         )
+
+    async def test_get_diary_pages_paginates_and_filters_by_date_and_source(self):
+        http = FakeQueryPagesHttp()
+        original_client = notion.httpx.AsyncClient
+        notion.httpx.AsyncClient = lambda timeout: http
+        try:
+            result = await notion.get_diary_pages(
+                start_date="2026-06-17",
+                end_date="2026-06-23",
+                source="voice",
+            )
+        finally:
+            notion.httpx.AsyncClient = original_client
+
+        self.assertEqual(result, [{"id": "page-1"}, {"id": "page-2"}])
+        self.assertEqual(len(http.post_calls), 2)
+        self.assertEqual(
+            http.post_calls[0]["json"]["filter"],
+            {
+                "and": [
+                    {"property": "Created", "date": {"on_or_after": "2026-06-17"}},
+                    {"property": "Created", "date": {"on_or_before": "2026-06-23"}},
+                    {"property": "Source", "select": {"equals": "voice"}},
+                ]
+            },
+        )
+        self.assertNotIn("start_cursor", http.post_calls[0]["json"])
+        self.assertEqual(http.post_calls[1]["json"]["start_cursor"], "cursor-2")
 
 
 class FakeNotionHttp:
@@ -447,6 +480,52 @@ class FakeCreatePageHttp:
             return FakeResponse({"results": results})
         self.created_pages += 1
         return FakeResponse({"id": "page-1"})
+
+
+class FakeQueryPagesHttp:
+    def __init__(self):
+        self.post_calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def get(self, url, headers):
+        return FakeResponse({
+            "properties": {
+                "Name": {"type": "title"},
+                "Created": {"type": "date"},
+                "Tags": {"type": "multi_select"},
+                "Day": {"type": "select"},
+                "Source": {
+                    "type": "select",
+                    "select": {"options": [{"name": "voice"}, {"name": "text"}]},
+                },
+                "Telegram Chat ID": {"type": "number"},
+                "Telegram Message ID": {"type": "number"},
+                "Source Message URL": {"type": "url"},
+                "Voice File Unique ID": {"type": "rich_text"},
+                "Audio Duration": {"type": "number"},
+                "Audio File Size": {"type": "number"},
+                "Source Text SHA256": {"type": "rich_text"},
+            }
+        })
+
+    async def post(self, url, headers, json):
+        self.post_calls.append({"url": url, "headers": headers, "json": json})
+        if len(self.post_calls) == 1:
+            return FakeResponse({
+                "results": [{"id": "page-1"}],
+                "has_more": True,
+                "next_cursor": "cursor-2",
+            })
+        return FakeResponse({
+            "results": [{"id": "page-2"}],
+            "has_more": False,
+            "next_cursor": None,
+        })
 
 
 class FakeResponse:

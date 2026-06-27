@@ -923,6 +923,25 @@ class SaveDraftTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0][3]["source_text_hash"], bot._source_text_hash("Text"))
 
 
+class StatCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handle_stat_sends_formatted_audio_stats(self):
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(effective_message=message)
+
+        async def fake_build_audio_stats():
+            return "stats"
+
+        with (
+            patch.object(bot, "build_audio_stats", fake_build_audio_stats),
+            patch.object(bot, "format_audio_stats", return_value="*Аудио статистика*"),
+        ):
+            await bot.handle_stat(update, SimpleNamespace())
+
+        self.assertEqual(message.reply_text.await_args_list[0].args, ("Counting saved audio stats...",))
+        self.assertEqual(message.reply_text.await_args_list[1].args, ("*Аудио статистика*",))
+        self.assertEqual(message.reply_text.await_args_list[1].kwargs, {"parse_mode": "Markdown"})
+
+
 class MainRegistrationTests(unittest.TestCase):
     def test_main_restricts_all_commands_to_allowed_user(self):
         fake_app = FakePollingApplication()
@@ -939,7 +958,7 @@ class MainRegistrationTests(unittest.TestCase):
             for handler in command_handlers
         }
 
-        self.assertEqual(set(command_filters), {"start", "help", "weekly"})
+        self.assertEqual(set(command_filters), {"start", "help", "weekly", "stat"})
         for command, command_filter in command_filters.items():
             with self.subTest(command=command):
                 self.assertEqual(command_filter.user_ids, frozenset({bot.settings.allowed_user_id}))
