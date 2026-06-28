@@ -1,5 +1,7 @@
 import os
 import unittest
+from datetime import date
+from unittest.mock import patch
 
 os.environ.setdefault("TELEGRAM_TOKEN", "test-token")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
@@ -50,6 +52,11 @@ class NotionHelpersTests(unittest.TestCase):
             notion._combine_tags(page, ["work", "health"], "Labels"),
             [{"name": "Daily"}, {"name": "work"}, {"name": "health"}],
         )
+
+    def test_default_entry_date_uses_configured_diary_day(self):
+        with patch.object(notion, "diary_today", return_value=date(2026, 6, 21)):
+            self.assertEqual(notion._notion_entry_date(), "2026-06-21")
+            self.assertEqual(notion._today_label(), "21 июня")
 
 
 class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
@@ -309,6 +316,45 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, notion.SaveResult(page_id="page-1", created=True))
         self.assertEqual(http.created_pages, 1)
         self.assertEqual(len([call for call in http.post_calls if call["url"].endswith("/query")]), 0)
+
+    async def test_get_today_pages_uses_configured_diary_day(self):
+        http = FakeCreatePageHttp()
+        original_client = notion.httpx.AsyncClient
+        notion.httpx.AsyncClient = lambda timeout: http
+        try:
+            with patch.object(notion, "diary_today", return_value=date(2026, 6, 21)):
+                result = await notion.get_today_pages()
+        finally:
+            notion.httpx.AsyncClient = original_client
+
+        self.assertEqual(result, [])
+        query_payload = http.post_calls[-1]["json"]
+        self.assertEqual(
+            query_payload["filter"],
+            {"property": "Created", "date": {"equals": "2026-06-21"}},
+        )
+
+    async def test_get_week_pages_uses_configured_diary_day_range(self):
+        http = FakeCreatePageHttp()
+        original_client = notion.httpx.AsyncClient
+        notion.httpx.AsyncClient = lambda timeout: http
+        try:
+            with patch.object(notion, "diary_today", return_value=date(2026, 6, 21)):
+                result = await notion.get_week_pages()
+        finally:
+            notion.httpx.AsyncClient = original_client
+
+        self.assertEqual(result, [])
+        query_payload = http.post_calls[-1]["json"]
+        self.assertEqual(
+            query_payload["filter"],
+            {
+                "and": [
+                    {"property": "Created", "date": {"on_or_after": "2026-06-15"}},
+                    {"property": "Created", "date": {"on_or_before": "2026-06-21"}},
+                ]
+            },
+        )
 
 
 class FakeNotionHttp:

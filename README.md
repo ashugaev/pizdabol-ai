@@ -73,6 +73,8 @@ Each saved entry gets its own Notion row with its own tags.
 
 Every day at 21:00 (in your timezone) the bot sends a GPT-generated summary of all diary entries recorded that day. If no entries were recorded, it sends a friendly reminder instead.
 
+Date picker defaults and daily/weekly summaries use `DIARY_DAY_START_HOUR`; for example, with `DIARY_DAY_START_HOUR=4`, entries before 04:00 belong to the previous diary date.
+
 ## Notion database setup
 
 The bot works with the Notion Journal database described in the [official guide](https://www.notion.com/help/guides/journal). Make sure your database has the following properties:
@@ -126,6 +128,7 @@ cp .env.example .env
 | `NOTION_DATABASE_ID` | ID from the database URL: `notion.so/workspace/{ID}?v=...`        |
 | `ALLOWED_USER_ID`    | Your Telegram user ID — get it from [@userinfobot](https://t.me/userinfobot) |
 | `TIMEZONE`           | Your timezone, e.g. `Asia/Bangkok`, `Europe/Moscow`                |
+| `DIARY_DAY_START_HOUR` | Optional. Hour when the diary day starts in `TIMEZONE`, `0`-`23`; defaults to `0` |
 
 ### Connecting Notion integration to your database
 
