@@ -18,6 +18,7 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    Defaults,
     MessageHandler,
     filters,
 )
@@ -1282,6 +1283,7 @@ def main() -> None:
     app = (
         ApplicationBuilder()
         .token(settings.telegram_token)
+        .defaults(Defaults(disable_notification=settings.silent_notifications))
         .concurrent_updates(MAX_CONCURRENT_UPDATES)
         .post_init(replay_unprocessed_messages)
         .build()

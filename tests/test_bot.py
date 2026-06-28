@@ -15,6 +15,23 @@ os.environ.setdefault("ALLOWED_USER_ID", "1")
 import bot
 
 
+class ApplicationSetupTests(unittest.TestCase):
+    def _build_defaults(self, silent):
+        builder = FakeApplicationBuilder(FakePollingApplication())
+        with patch.object(bot, "ApplicationBuilder", return_value=builder), \
+                patch.object(bot.settings, "silent_notifications", silent):
+            bot.main()
+        return builder.defaults_value
+
+    def test_main_wires_silent_notifications_into_defaults(self):
+        defaults = self._build_defaults(True)
+        self.assertTrue(defaults.disable_notification)
+
+    def test_main_respects_disabled_silent_notifications(self):
+        defaults = self._build_defaults(False)
+        self.assertFalse(defaults.disable_notification)
+
+
 class PreviewRenderingTests(unittest.TestCase):
     def test_preview_text_combines_title_body_and_tags_with_html_escaping(self):
         entry_date = bot._default_entry_date()
@@ -891,11 +908,16 @@ class FakeApplicationBuilder:
     def __init__(self, app):
         self.app = app
         self.token_value = None
+        self.defaults_value = None
         self.concurrent_updates_value = None
         self.post_init_callback = None
 
     def token(self, value):
         self.token_value = value
+        return self
+
+    def defaults(self, value):
+        self.defaults_value = value
         return self
 
     def concurrent_updates(self, value):

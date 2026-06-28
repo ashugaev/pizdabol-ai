@@ -129,6 +129,7 @@ cp .env.example .env
 | `ALLOWED_USER_ID`    | Your Telegram user ID — get it from [@userinfobot](https://t.me/userinfobot) |
 | `TIMEZONE`           | Your timezone, e.g. `Asia/Bangkok`, `Europe/Moscow`                |
 | `DIARY_DAY_START_HOUR` | Optional. Hour when the diary day starts in `TIMEZONE`, `0`-`23`; defaults to `0` |
+| `SILENT_NOTIFICATIONS` | Optional. Send all messages silently (no push notifications), defaults to `true` |
 
 ### Connecting Notion integration to your database
 
