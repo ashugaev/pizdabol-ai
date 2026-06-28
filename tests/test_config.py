@@ -30,3 +30,10 @@ class ConfigValidationTests(unittest.TestCase):
         with patch.dict(os.environ, {"TIMEZONE": "Mars/Olympus"}, clear=True):
             with self.assertRaisesRegex(RuntimeError, "TIMEZONE must be a valid IANA timezone: Mars/Olympus"):
                 config._timezone()
+
+    def test_blank_anthropic_key_is_treated_as_unset(self):
+        # Mirrors how _Settings loads ANTHROPIC_API_KEY: a blank/whitespace value
+        # must collapse to "" so the roast button stays hidden.
+        for raw in ("", "   "):
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": raw}, clear=True):
+                self.assertEqual(config._optional_env("ANTHROPIC_API_KEY", "").strip(), "")

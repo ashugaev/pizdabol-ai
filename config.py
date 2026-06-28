@@ -42,7 +42,7 @@ class _Settings:
     notion_database_id: str = _required_env("NOTION_DATABASE_ID")
     allowed_user_id: int = _required_int("ALLOWED_USER_ID")
     timezone: str = _timezone()
-    anthropic_api_key: str = _optional_env("ANTHROPIC_API_KEY", "")
+    anthropic_api_key: str = _optional_env("ANTHROPIC_API_KEY", "").strip()
     anthropic_model: str = _optional_env("ANTHROPIC_MODEL", "claude-opus-4-8")
     roast_system_prompt: str = os.getenv("ROAST_SYSTEM_PROMPT", "").strip()
 
