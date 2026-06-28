@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Every task starts with `$manager`. Manager routes work through the catalogs below. Each agent and skill carries its own frontmatter `description` with triggers; read it before invoking.
+MANDATORY: every task runs through the `manager` skill first — no exception. It decomposes, routes via the catalogs below, validates, and closes out. Never edit files, run commands, or answer a task request without it. Each agent and skill has a frontmatter `description` with triggers; read it before invoking.
 
 ## Mirror
 
@@ -51,3 +51,4 @@ Capabilities loaded by description match. Source: [.agents/skills/](.agents/skil
 - For OpenAI formatting changes, keep JSON-only responses, Russian diary prompt behavior, long-transcription metadata-only path, and fallback tests.
 - For state changes, use temp paths in tests; never read or mutate `.data/message_state.json` during tests.
 - Avoid broad rewrites. One behavior path, one source of truth, no speculative fallback branches.
+- Autonomous delivery: from a feature branch (never `main`), commit, push, `gh pr create`, `gh pr checks --watch`, then `gh pr merge --squash --delete-branch` once green — no asking. Docs-only changes may merge without waiting for CI. Never merge on red/pending CI, push to `main`, force-push, or deploy. Skip only if `gh` is unavailable or the user opts out — say so.
