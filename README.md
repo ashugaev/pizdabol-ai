@@ -45,9 +45,12 @@ Daily sport health
 [              ✦ Format              ]
 [        Date: Today (YYYY-MM-DD)        ]
 [      Mark as Highlight ⭐       ]
+[            🔥 Roast             ]
 [            ✓ Save              ]
 [            Cancel              ]
 ```
+
+The **🔥 Roast** button only appears when `ANTHROPIC_API_KEY` is set (see below).
 
 The preview is a reply to the original voice message, so it stays threaded with the audio being processed. Clicking an edit button prompts you to send a new value. After you send it, the same preview message updates in place.
 Clicking **Format** replaces only the draft text with the formatter's cleaned text, split into semantic paragraphs (saved as separate Notion blocks). The cleaned text only fixes recognition/grammar slips without changing your wording or meaning. The title and tags are already applied before the click. After formatting, the button becomes **↺ Original** so you can revert to the untouched text. You can skip it and save the original transcription.
@@ -61,6 +64,14 @@ If Notion saving fails, the preview stays available with the Save button so you 
 ### Highlights
 
 Press **Mark as Highlight ⭐** to mark the entry as a key moment of the week. The button toggles — press again to unmark. When saved, the entry heading in Notion gets a `⭐` prefix so it's easy to spot.
+
+### 🔥 Roast mode
+
+When `ANTHROPIC_API_KEY` is configured, the preview shows a **🔥 Roast** button next to **Save**. Pressing it sends the current draft text to a more capable model (Anthropic Claude) acting as a blunt-but-caring therapist, and posts the analysis as a **new reply** in the chat. The original draft is never modified — Save still writes exactly what's in the preview.
+
+The conversation continues by replying: reply to any roast message and the bot sends the whole prior chain plus your reply back to the model, so you can ask follow-up questions and keep the thread going. These conversations live in RAM only and are discarded when the bot restarts.
+
+The system prompt is built in (in English) but can be replaced with `ROAST_SYSTEM_PROMPT`, and the model with `ANTHROPIC_MODEL`. Set `ROAST_LANGUAGE` (e.g. `Russian`) to make the model reply in a specific language regardless of the diary entry's language.
 
 ### Tags
 
@@ -134,6 +145,10 @@ cp .env.example .env
 | `TIMEZONE`           | Your timezone, e.g. `Asia/Bangkok`, `Europe/Moscow`                |
 | `DIARY_DAY_START_HOUR` | Optional. Hour when the diary day starts in `TIMEZONE`, `0`-`23`; defaults to `0` |
 | `SILENT_NOTIFICATIONS` | Optional. Send all messages silently (no push notifications), defaults to `true` |
+| `ANTHROPIC_API_KEY`  | Optional. Anthropic key that enables the **🔥 Roast** button. Without it the button is hidden |
+| `ANTHROPIC_MODEL`    | Optional. Claude model for roast mode, defaults to `claude-opus-4-8` |
+| `ROAST_LANGUAGE`     | Optional. Language the roast replies in, e.g. `English`, `Russian`; defaults to `English` |
+| `ROAST_SYSTEM_PROMPT` | Optional. Overrides the built-in roast (therapist) system prompt |
 
 ### Connecting Notion integration to your database
 
@@ -224,7 +239,8 @@ noter/
 │   ├── whisper.py          # Audio transcription via OpenAI Whisper
 │   ├── formatter.py        # Optional entry formatting via OpenAI
 │   ├── notion.py           # Notion API: create/update diary pages
-│   └── summary.py          # Daily summary and weekly report generation
+│   ├── summary.py          # Daily summary and weekly report generation
+│   └── roast.py            # «Разъёб» mode via Anthropic Claude
 ├── Makefile                # Dev and deploy commands
 ├── requirements.txt
 └── .env.example

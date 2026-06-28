@@ -63,6 +63,10 @@ class _Settings:
     timezone: str = _timezone()
     diary_day_start_hour: int = _diary_day_start_hour()
     silent_notifications: bool = _optional_bool("SILENT_NOTIFICATIONS", True)
+    anthropic_api_key: str = _optional_env("ANTHROPIC_API_KEY", "").strip()
+    anthropic_model: str = _optional_env("ANTHROPIC_MODEL", "claude-opus-4-8")
+    roast_language: str = _optional_env("ROAST_LANGUAGE", "English").strip()
+    roast_system_prompt: str = os.getenv("ROAST_SYSTEM_PROMPT", "").strip()
 
 
 settings = _Settings()
