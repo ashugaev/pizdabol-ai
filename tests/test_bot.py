@@ -1,5 +1,6 @@
 import os
 import unittest
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -12,6 +13,23 @@ os.environ.setdefault("NOTION_DATABASE_ID", "test-notion-db")
 os.environ.setdefault("ALLOWED_USER_ID", "1")
 
 import bot
+
+
+class ApplicationSetupTests(unittest.TestCase):
+    def _build_defaults(self, silent):
+        builder = FakeApplicationBuilder(FakePollingApplication())
+        with patch.object(bot, "ApplicationBuilder", return_value=builder), \
+                patch.object(bot.settings, "silent_notifications", silent):
+            bot.main()
+        return builder.defaults_value
+
+    def test_main_wires_silent_notifications_into_defaults(self):
+        defaults = self._build_defaults(True)
+        self.assertTrue(defaults.disable_notification)
+
+    def test_main_respects_disabled_silent_notifications(self):
+        defaults = self._build_defaults(False)
+        self.assertFalse(defaults.disable_notification)
 
 
 class PreviewRenderingTests(unittest.TestCase):
@@ -113,6 +131,22 @@ class PreviewRenderingTests(unittest.TestCase):
             [f"set_date:entry-1:{entry_date}" for entry_date in bot._entry_date_options()],
         )
         self.assertEqual(callback_data[-2:], ["back_to_preview:entry-1", "cancel:entry-1"])
+
+    def test_entry_date_options_use_configured_diary_day(self):
+        with patch.object(bot, "diary_today", return_value=date(2026, 6, 21)):
+            self.assertEqual(bot._default_entry_date(), "2026-06-21")
+            self.assertEqual(
+                bot._entry_date_options(),
+                [
+                    "2026-06-21",
+                    "2026-06-20",
+                    "2026-06-19",
+                    "2026-06-18",
+                    "2026-06-17",
+                    "2026-06-16",
+                    "2026-06-15",
+                ],
+            )
 
     def test_duplicate_voice_keyboard_scopes_actions_to_message_key(self):
         keyboard = bot._duplicate_voice_keyboard("123:10")
@@ -569,6 +603,120 @@ class FormatDraftFlowTests(unittest.IsolatedAsyncioTestCase):
             bot._preview_text("Title", "formatted body", ["work"], draft["entry_date"]),
         )
 
+    async def test_formatted_draft_keyboard_offers_original_instead_of_format(self):
+        draft = {
+            "id": "entry-1",
+            "title": "Title",
+            "text": "formatted body",
+            "raw_text": "raw transcription",
+            "formatted_text": "formatted body",
+            "formatted": True,
+            "tags": ["work"],
+            "entry_date": bot._default_entry_date(),
+        }
+
+        keyboard = bot._preview_keyboard_for_draft(draft)
+        callback_data = [
+            button.callback_data
+            for row in keyboard.inline_keyboard
+            for button in row
+        ]
+
+        self.assertIn("unformat:entry-1", callback_data)
+        self.assertNotIn("format:entry-1", callback_data)
+
+    async def test_format_then_unformat_round_trip_toggles_buttons(self):
+        fake_state_store = FakeStateStore()
+        fake_context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        fake_query = FakeQuery()
+        draft = {
+            "id": "entry-1",
+            "title": "Title",
+            "text": "raw transcription",
+            "raw_text": "raw transcription",
+            "formatted_text": "formatted body",
+            "formatted": False,
+            "tags": ["work"],
+            "chat_id": 123,
+            "preview_msg_id": 20,
+            "entry_date": bot._default_entry_date(),
+        }
+
+        def callbacks():
+            keyboard = bot._preview_keyboard_for_draft(draft)
+            return [
+                button.callback_data
+                for row in keyboard.inline_keyboard
+                for button in row
+            ]
+
+        with patch.object(bot, "state_store", fake_state_store):
+            self.assertIn("format:entry-1", callbacks())
+            await bot._format_draft(fake_query, fake_context, draft)
+            self.assertEqual(draft["text"], "formatted body")
+            self.assertIn("unformat:entry-1", callbacks())
+
+            await bot._unformat_draft(fake_query, fake_context, draft)
+            self.assertEqual(draft["text"], "raw transcription")
+            self.assertIn("format:entry-1", callbacks())
+
+            await bot._format_draft(fake_query, fake_context, draft)
+            self.assertEqual(draft["text"], "formatted body")
+            self.assertTrue(draft["formatted"])
+
+    async def test_unformat_draft_warns_when_already_original(self):
+        fake_state_store = FakeStateStore()
+        fake_context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        fake_query = FakeQuery()
+        draft = {
+            "id": "entry-1",
+            "title": "Title",
+            "text": "raw transcription",
+            "raw_text": "raw transcription",
+            "formatted_text": "formatted body",
+            "formatted": False,
+            "tags": ["work"],
+            "chat_id": 123,
+            "preview_msg_id": 20,
+            "entry_date": bot._default_entry_date(),
+        }
+
+        with patch.object(bot, "state_store", fake_state_store):
+            await bot._unformat_draft(fake_query, fake_context, draft)
+
+        fake_query.message.reply_text.assert_awaited_once()
+        self.assertEqual(fake_context.bot.edits, [])
+        self.assertEqual(fake_state_store.saved_drafts, [])
+
+    async def test_unformat_draft_restores_raw_text(self):
+        fake_state_store = FakeStateStore()
+        fake_context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        fake_query = FakeQuery()
+        draft = {
+            "id": "entry-1",
+            "title": "Title",
+            "text": "formatted body",
+            "raw_text": "raw transcription",
+            "formatted_text": "formatted body",
+            "formatted": True,
+            "tags": ["work"],
+            "chat_id": 123,
+            "preview_msg_id": 20,
+            "entry_date": bot._default_entry_date(),
+        }
+
+        with patch.object(bot, "state_store", fake_state_store):
+            await bot._unformat_draft(fake_query, fake_context, draft)
+
+        self.assertEqual(draft["text"], "raw transcription")
+        self.assertFalse(draft["formatted"])
+        self.assertEqual(draft["preview_page"], 0)
+        self.assertEqual(fake_state_store.saved_drafts[-1]["text"], "raw transcription")
+        self.assertEqual(
+            fake_context.bot.edits[0]["text"],
+            bot._preview_text("Title", "raw transcription", ["work"], draft["entry_date"]),
+        )
+
 
 class DatePickerFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_set_entry_date_persists_and_returns_to_preview(self):
@@ -775,6 +923,25 @@ class SaveDraftTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0][3]["source_text_hash"], bot._source_text_hash("Text"))
 
 
+class StatCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handle_stat_sends_formatted_audio_stats(self):
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(effective_message=message)
+
+        async def fake_build_audio_stats():
+            return "stats"
+
+        with (
+            patch.object(bot, "build_audio_stats", fake_build_audio_stats),
+            patch.object(bot, "format_audio_stats", return_value="*Аудио статистика*"),
+        ):
+            await bot.handle_stat(update, SimpleNamespace())
+
+        self.assertEqual(message.reply_text.await_args_list[0].args, ("Counting saved audio stats...",))
+        self.assertEqual(message.reply_text.await_args_list[1].args, ("*Аудио статистика*",))
+        self.assertEqual(message.reply_text.await_args_list[1].kwargs, {"parse_mode": "Markdown"})
+
+
 class MainRegistrationTests(unittest.TestCase):
     def test_main_restricts_all_commands_to_allowed_user(self):
         fake_app = FakePollingApplication()
@@ -791,7 +958,7 @@ class MainRegistrationTests(unittest.TestCase):
             for handler in command_handlers
         }
 
-        self.assertEqual(set(command_filters), {"start", "help", "weekly"})
+        self.assertEqual(set(command_filters), {"start", "help", "weekly", "stat"})
         for command, command_filter in command_filters.items():
             with self.subTest(command=command):
                 self.assertEqual(command_filter.user_ids, frozenset({bot.settings.allowed_user_id}))
@@ -874,11 +1041,16 @@ class FakeApplicationBuilder:
     def __init__(self, app):
         self.app = app
         self.token_value = None
+        self.defaults_value = None
         self.concurrent_updates_value = None
         self.post_init_callback = None
 
     def token(self, value):
         self.token_value = value
+        return self
+
+    def defaults(self, value):
+        self.defaults_value = value
         return self
 
     def concurrent_updates(self, value):
@@ -1047,25 +1219,25 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
             message=SimpleNamespace(chat_id=123, message_id=20, get_bot=lambda: fake_bot, reply_text=AsyncMock()),
         )
         context = SimpleNamespace(bot=fake_bot, user_data={})
-        draft = {"id": "entry-1", "text": "сегодня ничего не успел", "chat_id": 123}
+        draft = {"id": "entry-1", "text": "got nothing done today", "chat_id": 123}
 
         captured = []
 
         async def fake_roast(messages):
             captured.append([dict(m) for m in messages])
-            return "Разъёб готов."
+            return "Roast ready."
 
         with patch.object(bot.roast, "is_configured", lambda: True), \
                 patch.object(bot.roast, "roast", new=fake_roast):
             await bot._roast_draft(query, context, draft)
 
-        self.assertEqual(captured, [[{"role": "user", "content": "сегодня ничего не успел"}]])
+        self.assertEqual(captured, [[{"role": "user", "content": "got nothing done today"}]])
         # Status message (id 1001) was edited into the answer.
-        self.assertEqual(fake_bot.edits[-1]["text"], "Разъёб готов.")
+        self.assertEqual(fake_bot.edits[-1]["text"], "Roast ready.")
         stored = bot._roast_chains["123:1001"]
         self.assertEqual(stored, [
-            {"role": "user", "content": "сегодня ничего не успел"},
-            {"role": "assistant", "content": "Разъёб готов."},
+            {"role": "user", "content": "got nothing done today"},
+            {"role": "assistant", "content": "Roast ready."},
         ])
 
     async def test_roast_button_warns_when_not_configured(self):
@@ -1082,11 +1254,11 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_reply_to_roast_message_continues_conversation(self):
         fake_bot = FakeRoastBot()
         bot._roast_chains["123:50"] = [
-            {"role": "user", "content": "оригинал"},
-            {"role": "assistant", "content": "первый разъёб"},
+            {"role": "user", "content": "original entry"},
+            {"role": "assistant", "content": "first roast"},
         ]
         user_msg = SimpleNamespace(
-            text="а почему так?",
+            text="why is that?",
             reply_to_message=SimpleNamespace(message_id=50),
             chat_id=123,
             message_id=60,
@@ -1103,7 +1275,7 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
 
         async def fake_roast(messages):
             captured.append([dict(m) for m in messages])
-            return "ответ на вопрос"
+            return "answer to the question"
 
         with patch.object(bot.roast, "roast", new=fake_roast), \
                 patch.object(bot, "handle_text", new=AsyncMock()) as fake_handle_text:
@@ -1111,16 +1283,16 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
 
         fake_handle_text.assert_not_awaited()
         self.assertEqual(captured, [[
-            {"role": "user", "content": "оригинал"},
-            {"role": "assistant", "content": "первый разъёб"},
-            {"role": "user", "content": "а почему так?"},
+            {"role": "user", "content": "original entry"},
+            {"role": "assistant", "content": "first roast"},
+            {"role": "user", "content": "why is that?"},
         ]])
         # New assistant turn appended and stored under the freshly sent message id.
         self.assertEqual(bot._roast_chains["123:1001"], [
-            {"role": "user", "content": "оригинал"},
-            {"role": "assistant", "content": "первый разъёб"},
-            {"role": "user", "content": "а почему так?"},
-            {"role": "assistant", "content": "ответ на вопрос"},
+            {"role": "user", "content": "original entry"},
+            {"role": "assistant", "content": "first roast"},
+            {"role": "user", "content": "why is that?"},
+            {"role": "assistant", "content": "answer to the question"},
         ])
 
     async def test_long_roast_answer_splits_and_maps_every_chunk_to_chain(self):
@@ -1129,7 +1301,7 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
             message=SimpleNamespace(chat_id=123, message_id=20, get_bot=lambda: fake_bot, reply_text=AsyncMock()),
         )
         context = SimpleNamespace(bot=fake_bot, user_data={})
-        draft = {"id": "entry-1", "text": "повод", "chat_id": 123}
+        draft = {"id": "entry-1", "text": "a reason", "chat_id": 123}
         long_answer = "a" * (bot.TELEGRAM_MESSAGE_LIMIT + 500)
 
         with patch.object(bot.roast, "is_configured", lambda: True), \
@@ -1140,7 +1312,7 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fake_bot.edits), 1)
         self.assertEqual(len(fake_bot.sent), 2)  # status reply + second chunk
         expected_chain = [
-            {"role": "user", "content": "повод"},
+            {"role": "user", "content": "a reason"},
             {"role": "assistant", "content": long_answer},
         ]
         self.assertEqual(bot._roast_chains["123:1001"], expected_chain)

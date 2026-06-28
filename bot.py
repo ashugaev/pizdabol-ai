@@ -18,15 +18,18 @@ from telegram.ext import (
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    Defaults,
     MessageHandler,
     filters,
 )
 
 from config import settings
 from services import roast
+from services.diary_dates import diary_today
 from services.formatter import format_entry
 from services.notion import save_entry
 from services.state_store import state_store
+from services.stats import build_audio_stats, format_audio_stats
 from services.summary import generate_daily_summary, generate_weekly_report
 from services.whisper import transcribe
 
@@ -73,6 +76,7 @@ Send me a voice or text message and I'll:
 • Save it to your Notion journal
 
 Every day at 21:00 I'll send you a summary of the day.
+Use /stat to see your saved audio minutes.
 
 Type /help to see detailed instructions."""
 
@@ -88,14 +92,18 @@ HELP_TEXT = """*How to use Noter*
 4. Press *✓ Save* to send to Notion
 
 *Editing*
-*✦ Format* — replace only the text with a minimally cleaned version
+*✦ Format* — replace only the text with a minimally cleaned version, split into paragraphs
+*↺ Original* — appears after Format; restores the original text
 *✎ Title* — send a new title
 *✎ Text* — send a new text
 *✎ Tags* — send tags separated by commas: `sport, health, work`
 *Date* — choose today or one of the previous 6 days
 
 *Daily summary*
-Every day at 21:00 I send a summary of all entries recorded that day. If there are none, I'll send a friendly nudge instead."""
+Every day at 21:00 I send a summary of all entries recorded that day. If there are none, I'll send a friendly nudge instead.
+
+*Stats*
+*/stat* — show total saved audio minutes, daily stats for the last 7 days, and monthly stats for the last 6 months."""
 
 
 def _tags_html(tags: list[str]) -> str:
@@ -104,8 +112,7 @@ def _tags_html(tags: list[str]) -> str:
 
 
 def _local_today() -> date:
-    tz = zoneinfo.ZoneInfo(settings.timezone)
-    return datetime.now(tz).date()
+    return diary_today()
 
 
 def _entry_date_options() -> list[str]:
@@ -450,6 +457,7 @@ def _preview_keyboard(
     highlighted: bool = False,
     entry_date: str | None = None,
     show_format: bool = False,
+    show_original: bool = False,
     show_pagination: bool = False,
     preview_page: int = 0,
     page_count: int = 1,
@@ -476,10 +484,12 @@ def _preview_keyboard(
     )
     if show_format:
         rows.append([InlineKeyboardButton("✦ Format", callback_data=f"format:{entry_id}")])
+    elif show_original:
+        rows.append([InlineKeyboardButton("↺ Original", callback_data=f"unformat:{entry_id}")])
     rows.append([InlineKeyboardButton(f"Date: {_entry_date_label(entry_date)}", callback_data=f"pick_date:{entry_id}")])
     rows.append([highlight_btn])
     if roast.is_configured():
-        rows.append([InlineKeyboardButton("🔥 Разъёб", callback_data=f"roast:{entry_id}")])
+        rows.append([InlineKeyboardButton("🔥 Roast", callback_data=f"roast:{entry_id}")])
     rows.append([InlineKeyboardButton("✓ Save", callback_data=f"save:{entry_id}")])
     rows.append([InlineKeyboardButton("Cancel", callback_data=f"cancel:{entry_id}")])
     return InlineKeyboardMarkup(rows)
@@ -559,6 +569,7 @@ def _preview_keyboard_for_draft(draft: dict, preview: PreviewRender | None = Non
             and not draft.get("formatted")
             and draft.get("formatted_text") != draft.get("text")
         ),
+        show_original=bool(draft.get("formatted")),
         show_pagination=preview.truncated,
         preview_page=preview.page,
         page_count=preview.page_count,
@@ -655,7 +666,7 @@ async def _run_roast(reply_target, chain: list[dict], context, status_message=No
         answer = await roast.roast(chain)
     except Exception as e:
         logger.exception("Error generating roast")
-        error_text = f"Ошибка разъёба: {e}"
+        error_text = f"Roast failed: {e}"
         if status_message is not None:
             await _edit_reply_message(context, status_message, error_text)
         else:
@@ -667,15 +678,15 @@ async def _run_roast(reply_target, chain: list[dict], context, status_message=No
 
 async def _roast_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) -> None:
     if not roast.is_configured():
-        await query.message.reply_text("🔥 Разъёб недоступен: задай ANTHROPIC_API_KEY в .env.")
+        await query.message.reply_text("🔥 Roast is unavailable: set ANTHROPIC_API_KEY in .env.")
         return
 
     text = (draft.get("text") or "").strip()
     if not text:
-        await query.message.reply_text("Нечего разъёбывать — текст пустой.")
+        await query.message.reply_text("Nothing to roast — the text is empty.")
         return
 
-    status = await _reply_to_source(query.message, "🔥 Разъёбываю...")
+    status = await _reply_to_source(query.message, "🔥 Roasting...")
     chain = [{"role": "user", "content": text}]
     await _run_roast(query.message, chain, context, status_message=status)
 
@@ -689,7 +700,7 @@ async def _handle_roast_followup(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     new_chain = list(chain) + [{"role": "user", "content": reply_text}]
-    status = await _reply_to_source(user_msg, "🔥 Думаю...")
+    status = await _reply_to_source(user_msg, "🔥 Thinking...")
     await _run_roast(user_msg, new_chain, context, status_message=status)
 
 
@@ -1028,6 +1039,8 @@ async def entry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _format_draft(query, context, draft)
     elif action == "roast":
         await _roast_draft(query, context, draft)
+    elif action == "unformat":
+        await _unformat_draft(query, context, draft)
     elif action == "cancel":
         await _cancel_draft(query, context, entry_id, draft)
     elif action == "toggle_highlight":
@@ -1198,6 +1211,23 @@ async def _format_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) 
     await _edit_preview(context, draft)
 
 
+async def _unformat_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) -> None:
+    if not draft.get("formatted"):
+        await query.message.reply_text("This draft already shows the original text.")
+        return
+
+    raw_text = draft.get("raw_text")
+    if raw_text is None:
+        await query.message.reply_text("Original text is no longer available.")
+        return
+
+    draft["text"] = raw_text
+    draft["formatted"] = False
+    draft["preview_page"] = 0
+    state_store.save_draft(draft)
+    await _edit_preview(context, draft)
+
+
 async def _cancel_draft(query, context: ContextTypes.DEFAULT_TYPE, entry_id: str, draft: dict) -> None:
     _drafts(context).pop(entry_id, None)
     state_store.mark_message_cancelled(draft.get("message_key"))
@@ -1339,6 +1369,19 @@ async def handle_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text("Error generating weekly report.")
 
 
+async def handle_stat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text("Counting saved audio stats...")
+    try:
+        stats = await build_audio_stats()
+        await update.effective_message.reply_text(
+            format_audio_stats(stats),
+            parse_mode="Markdown",
+        )
+    except Exception:
+        logger.exception("Error generating audio stats")
+        await update.effective_message.reply_text("Error generating audio stats.")
+
+
 async def send_weekly_report(context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Generating weekly report...")
     try:
@@ -1381,6 +1424,7 @@ def main() -> None:
     app = (
         ApplicationBuilder()
         .token(settings.telegram_token)
+        .defaults(Defaults(disable_notification=settings.silent_notifications))
         .concurrent_updates(MAX_CONCURRENT_UPDATES)
         .post_init(replay_unprocessed_messages)
         .build()
@@ -1392,6 +1436,7 @@ def main() -> None:
         CommandHandler("start", handle_start, filters=user_filter),
         CommandHandler("help", handle_help, filters=user_filter),
         CommandHandler("weekly", handle_weekly, filters=user_filter),
+        CommandHandler("stat", handle_stat, filters=user_filter),
     ]
 
     for handler in command_handlers:
@@ -1414,7 +1459,7 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(
             entry_callback,
-            pattern="^(save|save_anyway|format|roast|cancel|toggle_highlight|preview_page|pick_date|set_date|back_to_preview|edit_title|edit_text|edit_tags):",
+            pattern="^(save|save_anyway|format|roast|unformat|cancel|toggle_highlight|preview_page|pick_date|set_date|back_to_preview|edit_title|edit_text|edit_tags):",
         )
     )
 

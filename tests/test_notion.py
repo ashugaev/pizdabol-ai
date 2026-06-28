@@ -1,5 +1,7 @@
 import os
 import unittest
+from datetime import date
+from unittest.mock import patch
 
 os.environ.setdefault("TELEGRAM_TOKEN", "test-token")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
@@ -50,6 +52,11 @@ class NotionHelpersTests(unittest.TestCase):
             notion._combine_tags(page, ["work", "health"], "Labels"),
             [{"name": "Daily"}, {"name": "work"}, {"name": "health"}],
         )
+
+    def test_default_entry_date_uses_configured_diary_day(self):
+        with patch.object(notion, "diary_today", return_value=date(2026, 6, 21)):
+            self.assertEqual(notion._notion_entry_date(), "2026-06-21")
+            self.assertEqual(notion._today_label(), "21 июня")
 
 
 class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
@@ -272,6 +279,28 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
             all(len(chunk) <= notion.NOTION_TEXT_CHUNK_SIZE for chunk in paragraph_chunks)
         )
 
+    async def test_create_page_splits_blank_line_paragraphs_into_separate_blocks(self):
+        http = FakeCreatePageHttp()
+        text = "First thought.\n\nSecond thought.\n\nThird thought."
+        original_client = notion.httpx.AsyncClient
+        notion.httpx.AsyncClient = lambda timeout: http
+        try:
+            await notion.create_page("Title", text, ["work"])
+        finally:
+            notion.httpx.AsyncClient = original_client
+
+        create_payload = http.post_calls[-1]["json"]
+        paragraph_texts = [
+            "".join(item["text"]["content"] for item in child["paragraph"]["rich_text"])
+            for child in create_payload["children"]
+            if child["type"] == "paragraph"
+        ]
+
+        self.assertEqual(
+            paragraph_texts,
+            ["First thought.", "Second thought.", "Third thought."],
+        )
+
     async def test_create_page_returns_existing_page_when_metadata_matches_duplicate(self):
         http = FakeCreatePageHttp(duplicate_id="existing-page")
         original_client = notion.httpx.AsyncClient
@@ -309,6 +338,78 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, notion.SaveResult(page_id="page-1", created=True))
         self.assertEqual(http.created_pages, 1)
         self.assertEqual(len([call for call in http.post_calls if call["url"].endswith("/query")]), 0)
+
+    async def test_get_today_pages_uses_configured_diary_day(self):
+        http = FakeCreatePageHttp()
+        original_client = notion.httpx.AsyncClient
+        notion.httpx.AsyncClient = lambda timeout: http
+        try:
+            with patch.object(notion, "diary_today", return_value=date(2026, 6, 21)):
+                result = await notion.get_today_pages()
+        finally:
+            notion.httpx.AsyncClient = original_client
+
+        self.assertEqual(result, [])
+        query_payload = http.post_calls[-1]["json"]
+        self.assertEqual(
+            query_payload["filter"],
+            {
+                "and": [
+                    {"property": "Created", "date": {"on_or_after": "2026-06-21"}},
+                    {"property": "Created", "date": {"on_or_before": "2026-06-21"}},
+                ]
+            },
+        )
+
+    async def test_get_week_pages_uses_configured_diary_day_range(self):
+        http = FakeCreatePageHttp()
+        original_client = notion.httpx.AsyncClient
+        notion.httpx.AsyncClient = lambda timeout: http
+        try:
+            with patch.object(notion, "diary_today", return_value=date(2026, 6, 21)):
+                result = await notion.get_week_pages()
+        finally:
+            notion.httpx.AsyncClient = original_client
+
+        self.assertEqual(result, [])
+        query_payload = http.post_calls[-1]["json"]
+        self.assertEqual(
+            query_payload["filter"],
+            {
+                "and": [
+                    {"property": "Created", "date": {"on_or_after": "2026-06-15"}},
+                    {"property": "Created", "date": {"on_or_before": "2026-06-21"}},
+                ]
+            },
+        )
+
+    async def test_get_diary_pages_paginates_and_filters_by_date_and_source(self):
+        http = FakeQueryPagesHttp()
+        original_client = notion.httpx.AsyncClient
+        notion.httpx.AsyncClient = lambda timeout: http
+        try:
+            result = await notion.get_diary_pages(
+                start_date="2026-06-17",
+                end_date="2026-06-23",
+                source="voice",
+            )
+        finally:
+            notion.httpx.AsyncClient = original_client
+
+        self.assertEqual(result, [{"id": "page-1"}, {"id": "page-2"}])
+        self.assertEqual(len(http.post_calls), 2)
+        self.assertEqual(
+            http.post_calls[0]["json"]["filter"],
+            {
+                "and": [
+                    {"property": "Created", "date": {"on_or_after": "2026-06-17"}},
+                    {"property": "Created", "date": {"on_or_before": "2026-06-23"}},
+                    {"property": "Source", "select": {"equals": "voice"}},
+                ]
+            },
+        )
+        self.assertNotIn("start_cursor", http.post_calls[0]["json"])
+        self.assertEqual(http.post_calls[1]["json"]["start_cursor"], "cursor-2")
 
 
 class FakeNotionHttp:
@@ -379,6 +480,52 @@ class FakeCreatePageHttp:
             return FakeResponse({"results": results})
         self.created_pages += 1
         return FakeResponse({"id": "page-1"})
+
+
+class FakeQueryPagesHttp:
+    def __init__(self):
+        self.post_calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def get(self, url, headers):
+        return FakeResponse({
+            "properties": {
+                "Name": {"type": "title"},
+                "Created": {"type": "date"},
+                "Tags": {"type": "multi_select"},
+                "Day": {"type": "select"},
+                "Source": {
+                    "type": "select",
+                    "select": {"options": [{"name": "voice"}, {"name": "text"}]},
+                },
+                "Telegram Chat ID": {"type": "number"},
+                "Telegram Message ID": {"type": "number"},
+                "Source Message URL": {"type": "url"},
+                "Voice File Unique ID": {"type": "rich_text"},
+                "Audio Duration": {"type": "number"},
+                "Audio File Size": {"type": "number"},
+                "Source Text SHA256": {"type": "rich_text"},
+            }
+        })
+
+    async def post(self, url, headers, json):
+        self.post_calls.append({"url": url, "headers": headers, "json": json})
+        if len(self.post_calls) == 1:
+            return FakeResponse({
+                "results": [{"id": "page-1"}],
+                "has_more": True,
+                "next_cursor": "cursor-2",
+            })
+        return FakeResponse({
+            "results": [{"id": "page-2"}],
+            "has_more": False,
+            "next_cursor": None,
+        })
 
 
 class FakeResponse:

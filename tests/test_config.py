@@ -37,3 +37,36 @@ class ConfigValidationTests(unittest.TestCase):
         for raw in ("", "   "):
             with patch.dict(os.environ, {"ANTHROPIC_API_KEY": raw}, clear=True):
                 self.assertEqual(config._optional_env("ANTHROPIC_API_KEY", "").strip(), "")
+
+    def test_diary_day_start_hour_defaults_to_midnight(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(config._diary_day_start_hour(), 0)
+
+    def test_diary_day_start_hour_accepts_custom_hour(self):
+        with patch.dict(os.environ, {"DIARY_DAY_START_HOUR": "4"}, clear=True):
+            self.assertEqual(config._diary_day_start_hour(), 4)
+
+    def test_diary_day_start_hour_rejects_invalid_values(self):
+        for value in ("not-a-number", "-1", "24"):
+            with self.subTest(value=value):
+                with patch.dict(os.environ, {"DIARY_DAY_START_HOUR": value}, clear=True):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "DIARY_DAY_START_HOUR must be an integer from 0 to 23",
+                    ):
+                        config._diary_day_start_hour()
+
+    def test_optional_bool_defaults_when_unset_or_blank(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(config._optional_bool("SILENT_NOTIFICATIONS", True))
+            self.assertFalse(config._optional_bool("SILENT_NOTIFICATIONS", False))
+        with patch.dict(os.environ, {"SILENT_NOTIFICATIONS": "   "}, clear=True):
+            self.assertTrue(config._optional_bool("SILENT_NOTIFICATIONS", True))
+
+    def test_optional_bool_parses_truthy_and_falsy_values(self):
+        for raw in ("1", "true", "TRUE", "Yes", "on"):
+            with patch.dict(os.environ, {"SILENT_NOTIFICATIONS": raw}, clear=True):
+                self.assertTrue(config._optional_bool("SILENT_NOTIFICATIONS", False))
+        for raw in ("0", "false", "no", "off", "anything"):
+            with patch.dict(os.environ, {"SILENT_NOTIFICATIONS": raw}, clear=True):
+                self.assertFalse(config._optional_bool("SILENT_NOTIFICATIONS", True))

@@ -8,7 +8,7 @@ A Telegram bot that turns voice messages into structured diary entries in Notion
 2. OpenAI Whisper transcribes the audio
 3. The formatter generates a title, tags, and a minimally cleaned text candidate
 4. The bot shows a preview with the generated title/tags but keeps the original transcription as text
-5. You can optionally click **Format** to replace only the text with the cleaned candidate
+5. You can optionally click **Format** to replace only the text with the cleaned candidate, split into paragraphs; **↺ Original** then restores the untouched text
 6. Optionally mark the entry as a highlight ⭐
 7. Press Save — the entry is saved as its own row in your Notion database
 8. Every day at 21:00 the bot sends a GPT-generated summary of the day
@@ -19,6 +19,8 @@ A Telegram bot that turns voice messages into structured diary entries in Notion
 |-----------|------------------------------------|
 | `/start`  | Welcome message and quick overview |
 | `/help`   | Detailed usage instructions        |
+| `/weekly` | Generate the weekly highlight report now |
+| `/stat`   | Show saved audio minutes overall, by day, and by month |
 
 ## Editing before saving
 
@@ -43,15 +45,15 @@ Daily sport health
 [              ✦ Format              ]
 [        Date: Today (YYYY-MM-DD)        ]
 [      Mark as Highlight ⭐       ]
-[            🔥 Разъёб            ]
+[            🔥 Roast             ]
 [            ✓ Save              ]
 [            Cancel              ]
 ```
 
-The **🔥 Разъёб** button only appears when `ANTHROPIC_API_KEY` is set (see below).
+The **🔥 Roast** button only appears when `ANTHROPIC_API_KEY` is set (see below).
 
 The preview is a reply to the original voice message, so it stays threaded with the audio being processed. Clicking an edit button prompts you to send a new value. After you send it, the same preview message updates in place.
-Clicking **Format** replaces only the draft text with the formatter's cleaned text. The title and tags are already applied before the click. You can skip it and save the original transcription.
+Clicking **Format** replaces only the draft text with the formatter's cleaned text, split into semantic paragraphs (saved as separate Notion blocks). The cleaned text only fixes recognition/grammar slips without changing your wording or meaning. The title and tags are already applied before the click. After formatting, the button becomes **↺ Original** so you can revert to the untouched text. You can skip it and save the original transcription.
 Clicking **Date** opens a 7-day picker. Choosing a date returns to the preview; **Back to preview** returns without changing the date, and **Cancel draft** discards the draft.
 
 If the bot recognizes a voice message that was already saved, it warns you before transcribing it again. You can cancel or choose **Add anyway** to create another Notion entry from the same audio.
@@ -63,13 +65,13 @@ If Notion saving fails, the preview stays available with the Save button so you 
 
 Press **Mark as Highlight ⭐** to mark the entry as a key moment of the week. The button toggles — press again to unmark. When saved, the entry heading in Notion gets a `⭐` prefix so it's easy to spot.
 
-### 🔥 Разъёб (roast mode)
+### 🔥 Roast mode
 
-When `ANTHROPIC_API_KEY` is configured, the preview shows a **🔥 Разъёб** button next to **Save**. Pressing it sends the current draft text to a more capable model (Anthropic Claude) acting as a blunt-but-caring therapist, and posts the analysis as a **new reply** in the chat. The original draft is never modified — Save still writes exactly what's in the preview.
+When `ANTHROPIC_API_KEY` is configured, the preview shows a **🔥 Roast** button next to **Save**. Pressing it sends the current draft text to a more capable model (Anthropic Claude) acting as a blunt-but-caring therapist, and posts the analysis as a **new reply** in the chat. The original draft is never modified — Save still writes exactly what's in the preview.
 
-The conversation continues by replying: reply to any «разъёб» message and the bot sends the whole prior chain plus your reply back to the model, so you can ask follow-up questions and keep the thread going. These conversations live in RAM only and are discarded when the bot restarts.
+The conversation continues by replying: reply to any roast message and the bot sends the whole prior chain plus your reply back to the model, so you can ask follow-up questions and keep the thread going. These conversations live in RAM only and are discarded when the bot restarts.
 
-The system prompt is built in but can be replaced with `ROAST_SYSTEM_PROMPT`, and the model with `ANTHROPIC_MODEL`.
+The system prompt is built in (in English) but can be replaced with `ROAST_SYSTEM_PROMPT`, and the model with `ANTHROPIC_MODEL`. Set `ROAST_LANGUAGE` (e.g. `Russian`) to make the model reply in a specific language regardless of the diary entry's language.
 
 ### Tags
 
@@ -82,7 +84,11 @@ Each saved entry gets its own Notion row with its own tags.
 
 ## Daily summary
 
-Every day at 21:00 (in your timezone) the bot sends a GPT-generated summary of all diary entries recorded that day. If no entries were recorded, it sends a friendly reminder instead.
+Every day at 21:00 (in your timezone) the bot sends a GPT-generated summary of all diary entries recorded that day. If no entries were recorded, it sends a friendly reminder instead. Daily and weekly summaries include a small stats block with entry count, saved audio minutes, and the busiest day for weekly reports.
+
+Use `/stat` to see total saved audio time, audio minutes for each of the last 7 days, and monthly audio totals for the last 6 months. Stats are calculated from saved Notion rows with `Audio Duration` filled in.
+
+Date picker defaults and daily/weekly summaries use `DIARY_DAY_START_HOUR`; for example, with `DIARY_DAY_START_HOUR=4`, entries before 04:00 belong to the previous diary date.
 
 ## Notion database setup
 
@@ -137,9 +143,12 @@ cp .env.example .env
 | `NOTION_DATABASE_ID` | ID from the database URL: `notion.so/workspace/{ID}?v=...`        |
 | `ALLOWED_USER_ID`    | Your Telegram user ID — get it from [@userinfobot](https://t.me/userinfobot) |
 | `TIMEZONE`           | Your timezone, e.g. `Asia/Bangkok`, `Europe/Moscow`                |
-| `ANTHROPIC_API_KEY`  | Optional. Anthropic key that enables the **🔥 Разъёб** button. Without it the button is hidden |
-| `ANTHROPIC_MODEL`    | Optional. Claude model for «разъёб», defaults to `claude-opus-4-8`  |
-| `ROAST_SYSTEM_PROMPT` | Optional. Overrides the built-in «разъёб» (therapist) system prompt |
+| `DIARY_DAY_START_HOUR` | Optional. Hour when the diary day starts in `TIMEZONE`, `0`-`23`; defaults to `0` |
+| `SILENT_NOTIFICATIONS` | Optional. Send all messages silently (no push notifications), defaults to `true` |
+| `ANTHROPIC_API_KEY`  | Optional. Anthropic key that enables the **🔥 Roast** button. Without it the button is hidden |
+| `ANTHROPIC_MODEL`    | Optional. Claude model for roast mode, defaults to `claude-opus-4-8` |
+| `ROAST_LANGUAGE`     | Optional. Language the roast replies in, e.g. `English`, `Russian`; defaults to `English` |
+| `ROAST_SYSTEM_PROMPT` | Optional. Overrides the built-in roast (therapist) system prompt |
 
 ### Connecting Notion integration to your database
 

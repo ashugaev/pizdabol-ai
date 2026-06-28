@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Every task starts with `$manager`. Manager routes work through the catalogs below. Each agent and skill carries its own frontmatter `description` with triggers; read it before invoking.
+MANDATORY: every task runs through the `manager` skill first — no exception. It decomposes, routes via the catalogs below, validates, and closes out. Never edit files, run commands, or answer a task request without it. Each agent and skill has a frontmatter `description` with triggers; read it before invoking.
 
 ## Mirror
 
@@ -39,6 +39,7 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 
 ## Always-on rules
 
+- English-only repo: author all code, comments, identifiers, user-facing strings, docs, tests, commit messages, PR titles/bodies, and git interactions in English. Make AI response language a runtime setting (e.g. `ROAST_LANGUAGE`) instead of hardcoding a non-English prompt.
 - Prefer the repo's current Python style: small functions, explicit constants, `unittest`, async tests via `unittest.IsolatedAsyncioTestCase`.
 - Run `make test` before sign-off for code changes. For narrow edits, run the targeted `python -m unittest ...` first, then `make test`.
 - Tests must be offline. Mock Telegram, OpenAI, Notion, network, filesystem state, and sleeps at the changed boundary.
@@ -51,3 +52,4 @@ Capabilities loaded by description match. Source: [.claude/skills/](.claude/skil
 - For OpenAI formatting changes, keep JSON-only responses, Russian diary prompt behavior, long-transcription metadata-only path, and fallback tests.
 - For state changes, use temp paths in tests; never read or mutate `.data/message_state.json` during tests.
 - Avoid broad rewrites. One behavior path, one source of truth, no speculative fallback branches.
+- Autonomous delivery: from a feature branch (never `main`), commit, push, `gh pr create`, `gh pr checks --watch`, then `gh pr merge --squash --delete-branch` once green — no asking. Docs-only changes may merge without waiting for CI. Never merge on red/pending CI, push to `main`, force-push, or deploy. Skip only if `gh` is unavailable or the user opts out — say so.

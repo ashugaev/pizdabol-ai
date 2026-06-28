@@ -3,6 +3,7 @@ import httpx
 import openai
 from config import settings
 from services.notion import API, HEADERS, NOTION_TIMEOUT, extract_page_title, get_today_pages, get_week_pages
+from services.stats import build_period_stats_from_pages, format_daily_stats, format_weekly_stats
 
 openai_client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
 
@@ -70,7 +71,8 @@ async def generate_weekly_report() -> str | None:
             {"role": "user", "content": full_text},
         ],
     )
-    return response.choices[0].message.content
+    stats = format_weekly_stats(build_period_stats_from_pages(pages))
+    return f"{stats}\n\n{response.choices[0].message.content}"
 
 
 async def generate_daily_summary() -> str | None:
@@ -99,4 +101,5 @@ async def generate_daily_summary() -> str | None:
             {"role": "user", "content": full_text},
         ],
     )
-    return response.choices[0].message.content
+    stats = format_daily_stats(build_period_stats_from_pages(pages))
+    return f"{stats}\n\n{response.choices[0].message.content}"

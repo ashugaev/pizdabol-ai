@@ -35,14 +35,15 @@ class FakeAnthropic:
 
 class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_roast_uses_configured_model_default_prompt_and_chain(self):
-        fake = FakeAnthropic(_text_response("Разъёб готов."))
-        chain = [{"role": "user", "content": "сегодня ничего не успел"}]
+        fake = FakeAnthropic(_text_response("Roast ready."))
+        chain = [{"role": "user", "content": "got nothing done today"}]
 
         with patch.object(roast.settings, "anthropic_api_key", "key"), \
+                patch.object(roast.settings, "roast_language", ""), \
                 patch.object(roast, "_client", fake):
             result = await roast.roast(chain)
 
-        self.assertEqual(result, "Разъёб готов.")
+        self.assertEqual(result, "Roast ready.")
         kwargs = fake.messages.calls[0]
         self.assertEqual(kwargs["model"], roast.settings.anthropic_model)
         self.assertEqual(kwargs["max_tokens"], roast.ROAST_MAX_TOKENS)
@@ -53,20 +54,33 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
         fake = FakeAnthropic(_text_response("ok"))
 
         with patch.object(roast.settings, "anthropic_api_key", "key"), \
-                patch.object(roast.settings, "roast_system_prompt", "Кастомный психотерапевт"), \
+                patch.object(roast.settings, "roast_language", ""), \
+                patch.object(roast.settings, "roast_system_prompt", "Custom therapist"), \
                 patch.object(roast, "_client", fake):
             await roast.roast([{"role": "user", "content": "x"}])
 
-        self.assertEqual(fake.messages.calls[0]["system"], "Кастомный психотерапевт")
+        self.assertEqual(fake.messages.calls[0]["system"], "Custom therapist")
+
+    async def test_roast_appends_response_language_directive(self):
+        fake = FakeAnthropic(_text_response("ok"))
+
+        with patch.object(roast.settings, "anthropic_api_key", "key"), \
+                patch.object(roast.settings, "roast_language", "Russian"), \
+                patch.object(roast, "_client", fake):
+            await roast.roast([{"role": "user", "content": "x"}])
+
+        system = fake.messages.calls[0]["system"]
+        self.assertTrue(system.startswith(roast.DEFAULT_SYSTEM_PROMPT))
+        self.assertIn("Always write your response in Russian", system)
 
     async def test_roast_concatenates_multiple_text_blocks(self):
-        fake = FakeAnthropic(_text_response("Первая часть.", "Вторая часть."))
+        fake = FakeAnthropic(_text_response("First part.", "Second part."))
 
         with patch.object(roast.settings, "anthropic_api_key", "key"), \
                 patch.object(roast, "_client", fake):
             result = await roast.roast([{"role": "user", "content": "x"}])
 
-        self.assertEqual(result, "Первая часть.\nВторая часть.")
+        self.assertEqual(result, "First part.\nSecond part.")
 
     async def test_roast_trims_long_alternating_chain_and_keeps_user_first(self):
         fake = FakeAnthropic(_text_response("ok"))

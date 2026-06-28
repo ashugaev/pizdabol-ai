@@ -1,9 +1,10 @@
 import asyncio
+import re
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-import zoneinfo
+from datetime import date, timedelta
 import httpx
 from config import settings
+from services.diary_dates import diary_today
 
 API = "https://api.notion.com/v1"
 NOTION_TIMEOUT = 30
@@ -92,8 +93,7 @@ MONTHS_RU = {
 
 
 def _today_date() -> str:
-    tz = zoneinfo.ZoneInfo(settings.timezone)
-    return datetime.now(tz).date().isoformat()  # e.g. "2026-04-09"
+    return diary_today().isoformat()  # e.g. "2026-04-09"
 
 
 def _notion_entry_date(entry_date: str | None = None) -> str:
@@ -106,9 +106,8 @@ def _notion_entry_date(entry_date: str | None = None) -> str:
 
 
 def _today_label() -> str:
-    tz = zoneinfo.ZoneInfo(settings.timezone)
-    now = datetime.now(tz)
-    return f"{now.day} {MONTHS_RU[now.month]}"
+    today = diary_today()
+    return f"{today.day} {MONTHS_RU[today.month]}"
 
 
 def extract_page_title(page: dict) -> str:
@@ -388,6 +387,13 @@ async def _find_duplicate_page(
     return results[0] if results else None
 
 
+def _split_paragraphs(text: str) -> list[str]:
+    """Splits text into semantic paragraphs on blank lines, dropping empties."""
+    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", text)]
+    paragraphs = [paragraph for paragraph in paragraphs if paragraph]
+    return paragraphs or [""]
+
+
 def _paragraph_blocks(text: str) -> list[dict]:
     return [
         {
@@ -395,26 +401,70 @@ def _paragraph_blocks(text: str) -> list[dict]:
             "type": "paragraph",
             "paragraph": {"rich_text": _rich_text(chunk)},
         }
-        for chunk in _text_chunks(text)
+        for paragraph in _split_paragraphs(text)
+        for chunk in _text_chunks(paragraph)
     ]
 
 
 async def get_today_pages() -> list[dict]:
+    today = _today_date()
+    return await get_diary_pages(start_date=today, end_date=today)
+
+
+def _database_query_filter(
+    schema: NotionSchema,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    source: str | None = None,
+) -> dict | None:
+    filters = []
+    if start_date:
+        filters.append({"property": schema.created, "date": {"on_or_after": start_date}})
+    if end_date:
+        filters.append({"property": schema.created, "date": {"on_or_before": end_date}})
+    if source:
+        filters.append({"property": schema.source, "select": {"equals": source}})
+
+    if not filters:
+        return None
+    if len(filters) == 1:
+        return filters[0]
+    return {"and": filters}
+
+
+async def get_diary_pages(
+    start_date: str | None = None,
+    end_date: str | None = None,
+    source: str | None = None,
+) -> list[dict]:
+    """Returns diary database pages matching optional date/source filters."""
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
         schema = await ensure_database_schema(http)
-        resp = await _request_with_retry(
-            http,
-            "post",
-            f"{API}/databases/{settings.notion_database_id}/query",
-            json={
-                "filter": {
-                    "property": schema.created,
-                    "date": {"equals": _today_date()},
-                },
+        query_filter = _database_query_filter(schema, start_date, end_date, source)
+        pages = []
+        cursor = None
+
+        while True:
+            payload = {
+                "page_size": 100,
                 "sorts": [{"property": schema.created, "direction": "ascending"}],
-            },
-        )
-        return resp.json().get("results", [])
+            }
+            if query_filter:
+                payload["filter"] = query_filter
+            if cursor:
+                payload["start_cursor"] = cursor
+
+            resp = await _request_with_retry(
+                http,
+                "post",
+                f"{API}/databases/{settings.notion_database_id}/query",
+                json=payload,
+            )
+            data = resp.json()
+            pages.extend(data.get("results", []))
+            if not data.get("has_more"):
+                return pages
+            cursor = data.get("next_cursor")
 
 
 async def _verify_page_created(http: httpx.AsyncClient, page_id: str) -> None:
@@ -481,26 +531,9 @@ async def create_page(
 
 async def get_week_pages() -> list[dict]:
     """Returns all diary pages created in the last 7 days, oldest first."""
-    tz = zoneinfo.ZoneInfo(settings.timezone)
-    today = datetime.now(tz).date()
+    today = diary_today()
     week_ago = today - timedelta(days=6)
-    async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        schema = await ensure_database_schema(http)
-        resp = await _request_with_retry(
-            http,
-            "post",
-            f"{API}/databases/{settings.notion_database_id}/query",
-            json={
-                "filter": {
-                    "and": [
-                        {"property": schema.created, "date": {"on_or_after": week_ago.isoformat()}},
-                        {"property": schema.created, "date": {"on_or_before": today.isoformat()}},
-                    ]
-                },
-                "sorts": [{"property": schema.created, "direction": "ascending"}],
-            },
-        )
-        return resp.json().get("results", [])
+    return await get_diary_pages(start_date=week_ago.isoformat(), end_date=today.isoformat())
 
 
 async def save_entry(
