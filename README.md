@@ -19,6 +19,8 @@ A Telegram bot that turns voice messages into structured diary entries in Notion
 |-----------|------------------------------------|
 | `/start`  | Welcome message and quick overview |
 | `/help`   | Detailed usage instructions        |
+| `/weekly` | Generate the weekly highlight report now |
+| `/stat`   | Show saved audio minutes overall, by day, and by month |
 
 ## Editing before saving
 
@@ -71,7 +73,9 @@ Each saved entry gets its own Notion row with its own tags.
 
 ## Daily summary
 
-Every day at 21:00 (in your timezone) the bot sends a GPT-generated summary of all diary entries recorded that day. If no entries were recorded, it sends a friendly reminder instead.
+Every day at 21:00 (in your timezone) the bot sends a GPT-generated summary of all diary entries recorded that day. If no entries were recorded, it sends a friendly reminder instead. Daily and weekly summaries include a small stats block with entry count, saved audio minutes, and the busiest day for weekly reports.
+
+Use `/stat` to see total saved audio time, audio minutes for each of the last 7 days, and monthly audio totals for the last 6 months. Stats are calculated from saved Notion rows with `Audio Duration` filled in.
 
 Date picker defaults and daily/weekly summaries use `DIARY_DAY_START_HOUR`; for example, with `DIARY_DAY_START_HOUR=4`, entries before 04:00 belong to the previous diary date.
 

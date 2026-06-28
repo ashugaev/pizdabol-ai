@@ -108,7 +108,13 @@ class SummaryTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await summary.generate_daily_summary()
 
-        self.assertEqual(result, "daily summary")
+        self.assertEqual(
+            result,
+            "*Цифры дня*\n"
+            "Записи: 2\n"
+            "Аудио: 0 мин · 0 аудио\n\n"
+            "daily summary",
+        )
         kwargs = fake_client.chat.completions.calls[0]
         self.assertEqual(
             kwargs["messages"][1]["content"],
@@ -143,7 +149,13 @@ class SummaryTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await summary.generate_weekly_report()
 
-        self.assertEqual(result, "weekly report")
+        self.assertEqual(
+            result,
+            "*Цифры недели*\n"
+            "Записи: 1\n"
+            "Аудио: 0 мин · 0 аудио\n\n"
+            "weekly report",
+        )
         kwargs = fake_client.chat.completions.calls[0]
         self.assertEqual(kwargs["model"], summary.settings.openai_summary_model)
         self.assertEqual(kwargs["max_completion_tokens"], 1024)
