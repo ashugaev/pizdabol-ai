@@ -23,6 +23,7 @@ from telegram.ext import (
 )
 
 from config import settings
+from services import roast
 from services.formatter import format_entry
 from services.notion import save_entry
 from services.state_store import state_store
@@ -44,6 +45,12 @@ STARTUP_REPLAY_LIMIT = 10
 DATE_PICKER_DAYS = 7
 TELEGRAM_MESSAGE_LIMIT = 4096
 SOURCE_DEEPLINK_PREFIX = "src_"
+ROAST_CHAINS_LIMIT = 50
+
+# In-memory (RAM-only) roast conversations, keyed by "chat_id:message_id" of each
+# bot roast message. Replying to one of those messages continues that conversation.
+# Intentionally not persisted: chains are discarded on restart.
+_roast_chains: dict[str, list[dict]] = {}
 
 
 @dataclass(frozen=True)
@@ -469,12 +476,12 @@ def _preview_keyboard(
     )
     if show_format:
         rows.append([InlineKeyboardButton("✦ Format", callback_data=f"format:{entry_id}")])
-    rows.extend([
-        [InlineKeyboardButton(f"Date: {_entry_date_label(entry_date)}", callback_data=f"pick_date:{entry_id}")],
-        [highlight_btn],
-        [InlineKeyboardButton("✓ Save", callback_data=f"save:{entry_id}")],
-        [InlineKeyboardButton("Cancel", callback_data=f"cancel:{entry_id}")],
-    ])
+    rows.append([InlineKeyboardButton(f"Date: {_entry_date_label(entry_date)}", callback_data=f"pick_date:{entry_id}")])
+    rows.append([highlight_btn])
+    if roast.is_configured():
+        rows.append([InlineKeyboardButton("🔥 Разъёб", callback_data=f"roast:{entry_id}")])
+    rows.append([InlineKeyboardButton("✓ Save", callback_data=f"save:{entry_id}")])
+    rows.append([InlineKeyboardButton("Cancel", callback_data=f"cancel:{entry_id}")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -597,6 +604,93 @@ async def _reply_to_source(message_ref, text: str, **kwargs):
         ),
         **kwargs,
     )
+
+
+def _roast_chain_key(chat_id: int, message_id: int) -> str:
+    return f"{chat_id}:{message_id}"
+
+
+def _store_roast_chain(chat_id: int, message_id: int, messages: list[dict]) -> None:
+    while len(_roast_chains) >= ROAST_CHAINS_LIMIT:
+        oldest = next(iter(_roast_chains))
+        _roast_chains.pop(oldest, None)
+    _roast_chains[_roast_chain_key(chat_id, message_id)] = [dict(message) for message in messages]
+
+
+def _split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+    chunks = []
+    remaining = text.strip()
+    while len(remaining) > limit:
+        split_at = remaining.rfind("\n", 0, limit)
+        if split_at <= 0:
+            split_at = remaining.rfind(" ", 0, limit)
+        if split_at <= 0:
+            split_at = limit
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        chunks.append(remaining)
+    return chunks or [""]
+
+
+async def _deliver_roast(reply_target, chain: list[dict], context, status_message=None):
+    """Send the latest assistant turn (chain[-1]) as Telegram message(s) and map every
+    delivered message id to the full chain so the user can reply to continue it."""
+    chunks = _split_message(chain[-1]["content"])
+    sent_messages = []
+    for index, chunk in enumerate(chunks):
+        if index == 0 and status_message is not None:
+            await _edit_reply_message(context, status_message, chunk)
+            sent_messages.append(status_message)
+        else:
+            target = sent_messages[-1] if sent_messages else reply_target
+            sent_messages.append(await _reply_to_source(target, chunk))
+    for message in sent_messages:
+        _store_roast_chain(_message_chat_id(message), message.message_id, chain)
+    return sent_messages[-1]
+
+
+async def _run_roast(reply_target, chain: list[dict], context, status_message=None) -> None:
+    try:
+        answer = await roast.roast(chain)
+    except Exception as e:
+        logger.exception("Error generating roast")
+        error_text = f"Ошибка разъёба: {e}"
+        if status_message is not None:
+            await _edit_reply_message(context, status_message, error_text)
+        else:
+            await _reply_to_source(reply_target, error_text)
+        return
+    chain.append({"role": "assistant", "content": answer})
+    await _deliver_roast(reply_target, chain, context, status_message=status_message)
+
+
+async def _roast_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) -> None:
+    if not roast.is_configured():
+        await query.message.reply_text("🔥 Разъёб недоступен: задай ANTHROPIC_API_KEY в .env.")
+        return
+
+    text = (draft.get("text") or "").strip()
+    if not text:
+        await query.message.reply_text("Нечего разъёбывать — текст пустой.")
+        return
+
+    status = await _reply_to_source(query.message, "🔥 Разъёбываю...")
+    chain = [{"role": "user", "content": text}]
+    await _run_roast(query.message, chain, context, status_message=status)
+
+
+async def _handle_roast_followup(update: Update, context: ContextTypes.DEFAULT_TYPE, chain_key: str) -> None:
+    user_msg = update.effective_message
+    chain = _roast_chains.get(chain_key)
+    reply_text = (user_msg.text or "").strip()
+    if chain is None or not reply_text:
+        await handle_text(update, context)
+        return
+
+    new_chain = list(chain) + [{"role": "user", "content": reply_text}]
+    status = await _reply_to_source(user_msg, "🔥 Думаю...")
+    await _run_roast(user_msg, new_chain, context, status_message=status)
 
 
 async def replay_unprocessed_messages(application: Application) -> None:
@@ -932,6 +1026,8 @@ async def entry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _save_draft(query, context, entry_id, draft)
     elif action == "format":
         await _format_draft(query, context, draft)
+    elif action == "roast":
+        await _roast_draft(query, context, draft)
     elif action == "cancel":
         await _cancel_draft(query, context, entry_id, draft)
     elif action == "toggle_highlight":
@@ -1197,6 +1293,9 @@ async def receive_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     prompt_id = reply_to.message_id
     prompt = _edit_prompts(context).pop(_prompt_key(chat_id, prompt_id), None)
     if not prompt:
+        if _roast_chain_key(chat_id, prompt_id) in _roast_chains:
+            await _handle_roast_followup(update, context, _roast_chain_key(chat_id, prompt_id))
+            return
         await handle_text(update, context)
         return
 
@@ -1315,7 +1414,7 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(
             entry_callback,
-            pattern="^(save|save_anyway|format|cancel|toggle_highlight|preview_page|pick_date|set_date|back_to_preview|edit_title|edit_text|edit_tags):",
+            pattern="^(save|save_anyway|format|roast|cancel|toggle_highlight|preview_page|pick_date|set_date|back_to_preview|edit_title|edit_text|edit_tags):",
         )
     )
 

@@ -43,9 +43,12 @@ Daily sport health
 [              ✦ Format              ]
 [        Date: Today (YYYY-MM-DD)        ]
 [      Mark as Highlight ⭐       ]
+[            🔥 Разъёб            ]
 [            ✓ Save              ]
 [            Cancel              ]
 ```
+
+The **🔥 Разъёб** button only appears when `ANTHROPIC_API_KEY` is set (see below).
 
 The preview is a reply to the original voice message, so it stays threaded with the audio being processed. Clicking an edit button prompts you to send a new value. After you send it, the same preview message updates in place.
 Clicking **Format** replaces only the draft text with the formatter's cleaned text. The title and tags are already applied before the click. You can skip it and save the original transcription.
@@ -59,6 +62,14 @@ If Notion saving fails, the preview stays available with the Save button so you 
 ### Highlights
 
 Press **Mark as Highlight ⭐** to mark the entry as a key moment of the week. The button toggles — press again to unmark. When saved, the entry heading in Notion gets a `⭐` prefix so it's easy to spot.
+
+### 🔥 Разъёб (roast mode)
+
+When `ANTHROPIC_API_KEY` is configured, the preview shows a **🔥 Разъёб** button next to **Save**. Pressing it sends the current draft text to a more capable model (Anthropic Claude) acting as a blunt-but-caring therapist, and posts the analysis as a **new reply** in the chat. The original draft is never modified — Save still writes exactly what's in the preview.
+
+The conversation continues by replying: reply to any «разъёб» message and the bot sends the whole prior chain plus your reply back to the model, so you can ask follow-up questions and keep the thread going. These conversations live in RAM only and are discarded when the bot restarts.
+
+The system prompt is built in but can be replaced with `ROAST_SYSTEM_PROMPT`, and the model with `ANTHROPIC_MODEL`.
 
 ### Tags
 
@@ -126,6 +137,9 @@ cp .env.example .env
 | `NOTION_DATABASE_ID` | ID from the database URL: `notion.so/workspace/{ID}?v=...`        |
 | `ALLOWED_USER_ID`    | Your Telegram user ID — get it from [@userinfobot](https://t.me/userinfobot) |
 | `TIMEZONE`           | Your timezone, e.g. `Asia/Bangkok`, `Europe/Moscow`                |
+| `ANTHROPIC_API_KEY`  | Optional. Anthropic key that enables the **🔥 Разъёб** button. Without it the button is hidden |
+| `ANTHROPIC_MODEL`    | Optional. Claude model for «разъёб», defaults to `claude-opus-4-8`  |
+| `ROAST_SYSTEM_PROMPT` | Optional. Overrides the built-in «разъёб» (therapist) system prompt |
 
 ### Connecting Notion integration to your database
 
@@ -216,7 +230,8 @@ noter/
 │   ├── whisper.py          # Audio transcription via OpenAI Whisper
 │   ├── formatter.py        # Optional entry formatting via OpenAI
 │   ├── notion.py           # Notion API: create/update diary pages
-│   └── summary.py          # Daily summary and weekly report generation
+│   ├── summary.py          # Daily summary and weekly report generation
+│   └── roast.py            # «Разъёб» mode via Anthropic Claude
 ├── Makefile                # Dev and deploy commands
 ├── requirements.txt
 └── .env.example

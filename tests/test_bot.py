@@ -969,3 +969,197 @@ class FakeStateStore:
 
     def remove_draft(self, entry_id):
         self.removed_drafts.append(entry_id)
+
+
+class FakeRoastBot:
+    def __init__(self):
+        self.sent = []
+        self.edits = []
+        self.username = "diary_bot"
+        self._counter = 1000
+
+    async def send_message(self, **kwargs):
+        self._counter += 1
+        self.sent.append(kwargs)
+        return SimpleNamespace(
+            chat_id=kwargs["chat_id"],
+            message_id=self._counter,
+            get_bot=lambda: self,
+        )
+
+    async def edit_message_text(self, **kwargs):
+        self.edits.append(kwargs)
+        return SimpleNamespace(
+            chat_id=kwargs["chat_id"],
+            message_id=kwargs["message_id"],
+            get_bot=lambda: self,
+        )
+
+
+class SplitMessageTests(unittest.TestCase):
+    def test_short_text_is_a_single_chunk(self):
+        self.assertEqual(bot._split_message("short"), ["short"])
+
+    def test_long_text_splits_into_chunks_within_limit(self):
+        text = "x" * (bot.TELEGRAM_MESSAGE_LIMIT * 2 + 10)
+        chunks = bot._split_message(text)
+
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(len(chunk) <= bot.TELEGRAM_MESSAGE_LIMIT for chunk in chunks))
+        self.assertEqual("".join(chunks), text)
+
+    def test_prefers_newline_then_space_boundaries(self):
+        first = "a" * (bot.TELEGRAM_MESSAGE_LIMIT - 5)
+        text = f"{first}\nsecond part"
+        chunks = bot._split_message(text)
+
+        self.assertEqual(chunks[0], first)
+        self.assertEqual(chunks[1], "second part")
+
+
+class RoastKeyboardTests(unittest.TestCase):
+    def test_roast_button_appears_just_before_save_when_configured(self):
+        with patch.object(bot.roast, "is_configured", lambda: True):
+            keyboard = bot._preview_keyboard("entry-1", entry_date=bot._default_entry_date())
+        callback_data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+
+        self.assertIn("roast:entry-1", callback_data)
+        self.assertEqual(callback_data.index("roast:entry-1"), callback_data.index("save:entry-1") - 1)
+
+    def test_roast_button_hidden_when_not_configured(self):
+        with patch.object(bot.roast, "is_configured", lambda: False):
+            keyboard = bot._preview_keyboard("entry-1", entry_date=bot._default_entry_date())
+        callback_data = [b.callback_data for row in keyboard.inline_keyboard for b in row]
+
+        self.assertNotIn("roast:entry-1", callback_data)
+
+
+class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        bot._roast_chains.clear()
+
+    def tearDown(self):
+        bot._roast_chains.clear()
+
+    async def test_roast_button_sends_reply_and_stores_chain(self):
+        fake_bot = FakeRoastBot()
+        query = SimpleNamespace(
+            message=SimpleNamespace(chat_id=123, message_id=20, get_bot=lambda: fake_bot, reply_text=AsyncMock()),
+        )
+        context = SimpleNamespace(bot=fake_bot, user_data={})
+        draft = {"id": "entry-1", "text": "сегодня ничего не успел", "chat_id": 123}
+
+        captured = []
+
+        async def fake_roast(messages):
+            captured.append([dict(m) for m in messages])
+            return "Разъёб готов."
+
+        with patch.object(bot.roast, "is_configured", lambda: True), \
+                patch.object(bot.roast, "roast", new=fake_roast):
+            await bot._roast_draft(query, context, draft)
+
+        self.assertEqual(captured, [[{"role": "user", "content": "сегодня ничего не успел"}]])
+        # Status message (id 1001) was edited into the answer.
+        self.assertEqual(fake_bot.edits[-1]["text"], "Разъёб готов.")
+        stored = bot._roast_chains["123:1001"]
+        self.assertEqual(stored, [
+            {"role": "user", "content": "сегодня ничего не успел"},
+            {"role": "assistant", "content": "Разъёб готов."},
+        ])
+
+    async def test_roast_button_warns_when_not_configured(self):
+        reply_text = AsyncMock()
+        query = SimpleNamespace(message=SimpleNamespace(reply_text=reply_text))
+        context = SimpleNamespace(bot=FakeRoastBot(), user_data={})
+
+        with patch.object(bot.roast, "is_configured", lambda: False):
+            await bot._roast_draft(query, context, {"id": "e", "text": "x", "chat_id": 1})
+
+        reply_text.assert_awaited_once()
+        self.assertIn("ANTHROPIC_API_KEY", reply_text.await_args.args[0])
+
+    async def test_reply_to_roast_message_continues_conversation(self):
+        fake_bot = FakeRoastBot()
+        bot._roast_chains["123:50"] = [
+            {"role": "user", "content": "оригинал"},
+            {"role": "assistant", "content": "первый разъёб"},
+        ]
+        user_msg = SimpleNamespace(
+            text="а почему так?",
+            reply_to_message=SimpleNamespace(message_id=50),
+            chat_id=123,
+            message_id=60,
+            get_bot=lambda: fake_bot,
+            reply_text=AsyncMock(),
+        )
+        update = SimpleNamespace(
+            effective_message=user_msg,
+            effective_chat=SimpleNamespace(id=123),
+        )
+        context = SimpleNamespace(bot=fake_bot, user_data={})
+
+        captured = []
+
+        async def fake_roast(messages):
+            captured.append([dict(m) for m in messages])
+            return "ответ на вопрос"
+
+        with patch.object(bot.roast, "roast", new=fake_roast), \
+                patch.object(bot, "handle_text", new=AsyncMock()) as fake_handle_text:
+            await bot.receive_edit_reply(update, context)
+
+        fake_handle_text.assert_not_awaited()
+        self.assertEqual(captured, [[
+            {"role": "user", "content": "оригинал"},
+            {"role": "assistant", "content": "первый разъёб"},
+            {"role": "user", "content": "а почему так?"},
+        ]])
+        # New assistant turn appended and stored under the freshly sent message id.
+        self.assertEqual(bot._roast_chains["123:1001"], [
+            {"role": "user", "content": "оригинал"},
+            {"role": "assistant", "content": "первый разъёб"},
+            {"role": "user", "content": "а почему так?"},
+            {"role": "assistant", "content": "ответ на вопрос"},
+        ])
+
+    async def test_long_roast_answer_splits_and_maps_every_chunk_to_chain(self):
+        fake_bot = FakeRoastBot()
+        query = SimpleNamespace(
+            message=SimpleNamespace(chat_id=123, message_id=20, get_bot=lambda: fake_bot, reply_text=AsyncMock()),
+        )
+        context = SimpleNamespace(bot=fake_bot, user_data={})
+        draft = {"id": "entry-1", "text": "повод", "chat_id": 123}
+        long_answer = "a" * (bot.TELEGRAM_MESSAGE_LIMIT + 500)
+
+        with patch.object(bot.roast, "is_configured", lambda: True), \
+                patch.object(bot.roast, "roast", new=AsyncMock(return_value=long_answer)):
+            await bot._roast_draft(query, context, draft)
+
+        # Answer split into 2 chunks: status edit (id 1001) + one new reply (id 1002).
+        self.assertEqual(len(fake_bot.edits), 1)
+        self.assertEqual(len(fake_bot.sent), 2)  # status reply + second chunk
+        expected_chain = [
+            {"role": "user", "content": "повод"},
+            {"role": "assistant", "content": long_answer},
+        ]
+        self.assertEqual(bot._roast_chains["123:1001"], expected_chain)
+        self.assertEqual(bot._roast_chains["123:1002"], expected_chain)
+
+    async def test_reply_to_unrelated_message_falls_through_to_handle_text(self):
+        user_msg = SimpleNamespace(
+            text="just a normal note",
+            reply_to_message=SimpleNamespace(message_id=999),
+            chat_id=123,
+            message_id=60,
+        )
+        update = SimpleNamespace(
+            effective_message=user_msg,
+            effective_chat=SimpleNamespace(id=123),
+        )
+        context = SimpleNamespace(bot=FakeRoastBot(), user_data={})
+
+        with patch.object(bot, "handle_text", new=AsyncMock()) as fake_handle_text:
+            await bot.receive_edit_reply(update, context)
+
+        fake_handle_text.assert_awaited_once()
