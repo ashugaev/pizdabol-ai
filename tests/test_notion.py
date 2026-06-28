@@ -272,6 +272,28 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
             all(len(chunk) <= notion.NOTION_TEXT_CHUNK_SIZE for chunk in paragraph_chunks)
         )
 
+    async def test_create_page_splits_blank_line_paragraphs_into_separate_blocks(self):
+        http = FakeCreatePageHttp()
+        text = "First thought.\n\nSecond thought.\n\nThird thought."
+        original_client = notion.httpx.AsyncClient
+        notion.httpx.AsyncClient = lambda timeout: http
+        try:
+            await notion.create_page("Title", text, ["work"])
+        finally:
+            notion.httpx.AsyncClient = original_client
+
+        create_payload = http.post_calls[-1]["json"]
+        paragraph_texts = [
+            "".join(item["text"]["content"] for item in child["paragraph"]["rich_text"])
+            for child in create_payload["children"]
+            if child["type"] == "paragraph"
+        ]
+
+        self.assertEqual(
+            paragraph_texts,
+            ["First thought.", "Second thought.", "Third thought."],
+        )
+
     async def test_create_page_returns_existing_page_when_metadata_matches_duplicate(self):
         http = FakeCreatePageHttp(duplicate_id="existing-page")
         original_client = notion.httpx.AsyncClient

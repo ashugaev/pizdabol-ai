@@ -1,4 +1,5 @@
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import zoneinfo
@@ -388,6 +389,13 @@ async def _find_duplicate_page(
     return results[0] if results else None
 
 
+def _split_paragraphs(text: str) -> list[str]:
+    """Splits text into semantic paragraphs on blank lines, dropping empties."""
+    paragraphs = [paragraph.strip() for paragraph in re.split(r"\n\s*\n", text)]
+    paragraphs = [paragraph for paragraph in paragraphs if paragraph]
+    return paragraphs or [""]
+
+
 def _paragraph_blocks(text: str) -> list[dict]:
     return [
         {
@@ -395,7 +403,8 @@ def _paragraph_blocks(text: str) -> list[dict]:
             "type": "paragraph",
             "paragraph": {"rich_text": _rich_text(chunk)},
         }
-        for chunk in _text_chunks(text)
+        for paragraph in _split_paragraphs(text)
+        for chunk in _text_chunks(paragraph)
     ]
 
 

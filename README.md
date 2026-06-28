@@ -8,7 +8,7 @@ A Telegram bot that turns voice messages into structured diary entries in Notion
 2. OpenAI Whisper transcribes the audio
 3. The formatter generates a title, tags, and a minimally cleaned text candidate
 4. The bot shows a preview with the generated title/tags but keeps the original transcription as text
-5. You can optionally click **Format** to replace only the text with the cleaned candidate
+5. You can optionally click **Format** to replace only the text with the cleaned candidate, split into paragraphs; **↺ Original** then restores the untouched text
 6. Optionally mark the entry as a highlight ⭐
 7. Press Save — the entry is saved as its own row in your Notion database
 8. Every day at 21:00 the bot sends a GPT-generated summary of the day
@@ -48,7 +48,7 @@ Daily sport health
 ```
 
 The preview is a reply to the original voice message, so it stays threaded with the audio being processed. Clicking an edit button prompts you to send a new value. After you send it, the same preview message updates in place.
-Clicking **Format** replaces only the draft text with the formatter's cleaned text. The title and tags are already applied before the click. You can skip it and save the original transcription.
+Clicking **Format** replaces only the draft text with the formatter's cleaned text, split into semantic paragraphs (saved as separate Notion blocks). The cleaned text only fixes recognition/grammar slips without changing your wording or meaning. The title and tags are already applied before the click. After formatting, the button becomes **↺ Original** so you can revert to the untouched text. You can skip it and save the original transcription.
 Clicking **Date** opens a 7-day picker. Choosing a date returns to the preview; **Back to preview** returns without changing the date, and **Cancel draft** discards the draft.
 
 If the bot recognizes a voice message that was already saved, it warns you before transcribing it again. You can cancel or choose **Add anyway** to create another Notion entry from the same audio.

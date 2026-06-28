@@ -28,6 +28,7 @@ class FormatterTests(unittest.IsolatedAsyncioTestCase):
         system_prompt = kwargs["messages"][0]["content"]
         self.assertIn("исходный текст с минимальной правкой", system_prompt)
         self.assertIn("не переписывай стиль", system_prompt)
+        self.assertIn("смысловые абзацы", system_prompt)
 
     async def test_format_entry_uses_metadata_only_for_long_transcription(self):
         fake_client = FakeChatClient('{"title":"Long Title","tags":["work"]}')
