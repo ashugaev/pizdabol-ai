@@ -8,6 +8,13 @@ def _optional_env(name: str, default: str) -> str:
     return os.getenv(name) or default
 
 
+def _optional_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _required_env(name: str) -> str:
     value = os.getenv(name)
     if value is None or not value.strip():
@@ -55,6 +62,7 @@ class _Settings:
     allowed_user_id: int = _required_int("ALLOWED_USER_ID")
     timezone: str = _timezone()
     diary_day_start_hour: int = _diary_day_start_hour()
+    silent_notifications: bool = _optional_bool("SILENT_NOTIFICATIONS", True)
 
 
 settings = _Settings()

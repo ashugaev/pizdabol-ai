@@ -48,3 +48,18 @@ class ConfigValidationTests(unittest.TestCase):
                         "DIARY_DAY_START_HOUR must be an integer from 0 to 23",
                     ):
                         config._diary_day_start_hour()
+
+    def test_optional_bool_defaults_when_unset_or_blank(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(config._optional_bool("SILENT_NOTIFICATIONS", True))
+            self.assertFalse(config._optional_bool("SILENT_NOTIFICATIONS", False))
+        with patch.dict(os.environ, {"SILENT_NOTIFICATIONS": "   "}, clear=True):
+            self.assertTrue(config._optional_bool("SILENT_NOTIFICATIONS", True))
+
+    def test_optional_bool_parses_truthy_and_falsy_values(self):
+        for raw in ("1", "true", "TRUE", "Yes", "on"):
+            with patch.dict(os.environ, {"SILENT_NOTIFICATIONS": raw}, clear=True):
+                self.assertTrue(config._optional_bool("SILENT_NOTIFICATIONS", False))
+        for raw in ("0", "false", "no", "off", "anything"):
+            with patch.dict(os.environ, {"SILENT_NOTIFICATIONS": raw}, clear=True):
+                self.assertFalse(config._optional_bool("SILENT_NOTIFICATIONS", True))
