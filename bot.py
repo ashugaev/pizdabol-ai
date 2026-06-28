@@ -83,7 +83,8 @@ HELP_TEXT = """*How to use Noter*
 4. Press *✓ Save* to send to Notion
 
 *Editing*
-*✦ Format* — replace only the text with a minimally cleaned version
+*✦ Format* — replace only the text with a minimally cleaned version, split into paragraphs
+*↺ Original* — appears after Format; restores the original text
 *✎ Title* — send a new title
 *✎ Text* — send a new text
 *✎ Tags* — send tags separated by commas: `sport, health, work`
@@ -444,6 +445,7 @@ def _preview_keyboard(
     highlighted: bool = False,
     entry_date: str | None = None,
     show_format: bool = False,
+    show_original: bool = False,
     show_pagination: bool = False,
     preview_page: int = 0,
     page_count: int = 1,
@@ -470,6 +472,8 @@ def _preview_keyboard(
     )
     if show_format:
         rows.append([InlineKeyboardButton("✦ Format", callback_data=f"format:{entry_id}")])
+    elif show_original:
+        rows.append([InlineKeyboardButton("↺ Original", callback_data=f"unformat:{entry_id}")])
     rows.extend([
         [InlineKeyboardButton(f"Date: {_entry_date_label(entry_date)}", callback_data=f"pick_date:{entry_id}")],
         [highlight_btn],
@@ -553,6 +557,7 @@ def _preview_keyboard_for_draft(draft: dict, preview: PreviewRender | None = Non
             and not draft.get("formatted")
             and draft.get("formatted_text") != draft.get("text")
         ),
+        show_original=bool(draft.get("formatted")),
         show_pagination=preview.truncated,
         preview_page=preview.page,
         page_count=preview.page_count,
@@ -933,6 +938,8 @@ async def entry_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await _save_draft(query, context, entry_id, draft)
     elif action == "format":
         await _format_draft(query, context, draft)
+    elif action == "unformat":
+        await _unformat_draft(query, context, draft)
     elif action == "cancel":
         await _cancel_draft(query, context, entry_id, draft)
     elif action == "toggle_highlight":
@@ -1098,6 +1105,23 @@ async def _format_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) 
 
     draft["text"] = formatted_text
     draft["formatted"] = True
+    draft["preview_page"] = 0
+    state_store.save_draft(draft)
+    await _edit_preview(context, draft)
+
+
+async def _unformat_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) -> None:
+    if not draft.get("formatted"):
+        await query.message.reply_text("This draft already shows the original text.")
+        return
+
+    raw_text = draft.get("raw_text")
+    if raw_text is None:
+        await query.message.reply_text("Original text is no longer available.")
+        return
+
+    draft["text"] = raw_text
+    draft["formatted"] = False
     draft["preview_page"] = 0
     state_store.save_draft(draft)
     await _edit_preview(context, draft)
@@ -1317,7 +1341,7 @@ def main() -> None:
     app.add_handler(
         CallbackQueryHandler(
             entry_callback,
-            pattern="^(save|save_anyway|format|cancel|toggle_highlight|preview_page|pick_date|set_date|back_to_preview|edit_title|edit_text|edit_tags):",
+            pattern="^(save|save_anyway|format|unformat|cancel|toggle_highlight|preview_page|pick_date|set_date|back_to_preview|edit_title|edit_text|edit_tags):",
         )
     )
 
