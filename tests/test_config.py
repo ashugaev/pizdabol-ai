@@ -31,12 +31,13 @@ class ConfigValidationTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "TIMEZONE must be a valid IANA timezone: Mars/Olympus"):
                 config._timezone()
 
-    def test_blank_anthropic_key_is_treated_as_unset(self):
-        # Mirrors how _Settings loads ANTHROPIC_API_KEY: a blank/whitespace value
-        # must collapse to "" so the roast button stays hidden.
-        for raw in ("", "   "):
-            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": raw}, clear=True):
-                self.assertEqual(config._optional_env("ANTHROPIC_API_KEY", "").strip(), "")
+    def test_optional_env_empty_value_falls_back_to_default(self):
+        # Mirrors how _Settings loads optional model overrides like OPENAI_ROAST_MODEL:
+        # an empty or unset value must fall back to the built-in default.
+        with patch.dict(os.environ, {"OPENAI_ROAST_MODEL": ""}, clear=True):
+            self.assertEqual(config._optional_env("OPENAI_ROAST_MODEL", "gpt-5.4"), "gpt-5.4")
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(config._optional_env("OPENAI_ROAST_MODEL", "gpt-5.4"), "gpt-5.4")
 
     def test_diary_day_start_hour_defaults_to_midnight(self):
         with patch.dict(os.environ, {}, clear=True):

@@ -94,6 +94,7 @@ class PreviewRenderingTests(unittest.TestCase):
                 "format:entry-1",
                 "pick_date:entry-1",
                 "toggle_highlight:entry-1",
+                "roast:entry-1",
                 "save:entry-1",
                 "cancel:entry-1",
             ],

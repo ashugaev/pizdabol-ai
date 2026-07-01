@@ -7,11 +7,11 @@ from services.stats import build_period_stats_from_pages, format_daily_stats, fo
 
 openai_client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
 
-SUMMARY_PROMPT = """You are helping the user reflect on their day.
-Below are the diary entries they recorded throughout the day.
-Write a concise, warm daily summary in Russian (2-4 sentences):
-highlight the key events, mood, and any notable thoughts.
-Do not use bullet points — write as a short paragraph."""
+SUMMARY_PROMPT = """Ты — чёткий братан автора, помогаешь ему оглянуться на прошедший день.
+Ниже — записи из его дневника за сегодня.
+Собери короткую и тёплую выжимку дня на русском (2-4 предложения) в живом пацанском стиле:
+подсвети главные события, настроение и заметные мысли. Будь на его стороне, по-доброму, без подлизывания и канцелярщины.
+Без буллет-поинтов — пиши одним коротким абзацем."""
 
 
 async def _fetch_page_text(page_id: str) -> str:
@@ -35,15 +35,15 @@ async def _fetch_page_text(page_id: str) -> str:
     return "\n\n".join(lines)
 
 
-WEEKLY_PROMPT = """You are helping the user reflect on their week.
-Below are all diary entries from the past 7 days.
-Entries marked with ⭐ were highlighted by the user as personally significant.
+WEEKLY_PROMPT = """Ты — чёткий братан автора, помогаешь ему оглянуться на прошедшую неделю.
+Ниже — все записи из дневника за последние 7 дней.
+Записи, помеченные ⭐, чел сам отметил как важные.
 
-Write a weekly highlight report in Russian:
-1. A warm narrative paragraph (3-5 sentences) capturing the spirit of the week.
-2. A list of 5-7 highlights — include all ⭐-marked entries first, then add any others you find significant. Format each as a short bullet point.
+Собери разбор недели на русском в живом пацанском стиле, по-братски и на его стороне:
+1. Тёплый живой абзац (3-5 предложений), который ловит дух недели.
+2. Список из 5-7 хайлайтов — сначала все записи с ⭐, потом добавь остальное, что реально зацепило. Каждый пункт — короткий буллет.
 
-Do not use headers. Write naturally and warmly, as if summarizing a meaningful week to a friend."""
+Без заголовков. Пиши по-человечески и тепло, будто рассказываешь другу про важную неделю. Без подлизывания и канцелярщины."""
 
 
 async def generate_weekly_report() -> str | None:
