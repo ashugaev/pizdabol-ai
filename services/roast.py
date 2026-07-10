@@ -1,3 +1,4 @@
+import json
 import logging
 
 import openai
@@ -9,6 +10,23 @@ logger = logging.getLogger(__name__)
 ROAST_MAX_COMPLETION_TOKENS = 4096
 ROAST_REASONING_EFFORT = "high"
 MAX_CONVERSATION_MESSAGES = 40
+
+# Compact author profile the model maintains across roasts.
+PROFILE_MAX_COMPLETION_TOKENS = 1024
+MAX_PROFILE_POINTS = 12
+MAX_PROFILE_POINT_LENGTH = 140
+
+PROFILE_EXTRACTION_PROMPT = f"""Ты ведёшь компактный профиль автора дневника, чтобы лучше понимать, кто он.
+На вход дают новую запись из дневника и уже известные факты о человеке.
+Обнови список фактов, которые реально дают контекст о том, что это за человек: характер, ценности, привычки, отношения, работа, цели, страхи, повторяющиеся темы и паттерны.
+
+Правила:
+- Каждый факт — одно короткое предложение, максимум {MAX_PROFILE_POINT_LENGTH} символов.
+- Верни не больше {MAX_PROFILE_POINTS} самых важных фактов.
+- Объединяй новое с уже известным, убирай дубли и устаревшее, оставляй только самое ценное.
+- Только устойчивый контекст о человеке. Никакой воды, эмоций одного момента, пересказа записи или мусора.
+- Пиши на русском.
+Верни СТРОГО JSON вида {{"points": ["...", "..."]}} без пояснений."""
 
 DEFAULT_SYSTEM_PROMPT = """Ты — чёткий пацан, братан автора. Тебе прилетает запись из его личного дневника, и твоя работа — дать честный разъёб: срезать всю сахарную вату и вытащить наружу, что чел на самом деле чувствует и о чём молчит.
 
@@ -27,11 +45,16 @@ def is_configured() -> bool:
     return bool(settings.openai_api_key)
 
 
-def system_prompt() -> str:
+def system_prompt(points: list[str] | None = None) -> str:
     base = settings.roast_system_prompt or DEFAULT_SYSTEM_PROMPT
     language = (settings.roast_language or "").strip()
     if language:
         base = f"{base}\n\nВсегда пиши ответ на языке: {language}, независимо от языка записи в дневнике."
+    if points:
+        joined = "\n".join(f"- {point}" for point in points)
+        base = (
+            f"{base}\n\nЧто ты уже знаешь об авторе (фон для понимания, не пересказывай это в лоб):\n{joined}"
+        )
     return base
 
 
@@ -50,7 +73,7 @@ def _trim_chain(messages: list[dict]) -> list[dict]:
     return messages[-MAX_CONVERSATION_MESSAGES:]
 
 
-async def roast(messages: list[dict]) -> str:
+async def roast(messages: list[dict], points: list[str] | None = None) -> str:
     if not is_configured():
         raise RuntimeError("OPENAI_API_KEY is not configured")
 
@@ -58,9 +81,56 @@ async def roast(messages: list[dict]) -> str:
         model=settings.openai_roast_model,
         max_completion_tokens=ROAST_MAX_COMPLETION_TOKENS,
         reasoning_effort=ROAST_REASONING_EFFORT,
-        messages=[{"role": "system", "content": system_prompt()}] + _trim_chain(messages),
+        messages=[{"role": "system", "content": system_prompt(points)}] + _trim_chain(messages),
     )
     text = _extract_text(response)
     if not text:
         raise RuntimeError("OpenAI returned an empty response")
     return text
+
+
+def _normalize_points(points: list) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for point in points:
+        if not isinstance(point, str):
+            continue
+        text = " ".join(point.split())
+        if not text:
+            continue
+        if len(text) > MAX_PROFILE_POINT_LENGTH:
+            text = text[:MAX_PROFILE_POINT_LENGTH].rstrip()
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+        if len(result) >= MAX_PROFILE_POINTS:
+            break
+    return result
+
+
+async def extract_profile_points(diary_text: str, existing_points: list[str] | None = None) -> list[str]:
+    """Distill a compact, deduped set of durable facts about the author from a diary
+    entry, merged with what is already known. Returns the normalized full list."""
+    if not is_configured():
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    payload = json.dumps(
+        {"diary_entry": diary_text, "known_facts": existing_points or []},
+        ensure_ascii=False,
+    )
+    response = await client.chat.completions.create(
+        model=settings.openai_profile_model,
+        max_completion_tokens=PROFILE_MAX_COMPLETION_TOKENS,
+        response_format={"type": "json_object"},
+        messages=[
+            {"role": "system", "content": PROFILE_EXTRACTION_PROMPT},
+            {"role": "user", "content": payload},
+        ],
+    )
+    text = _extract_text(response)
+    if not text:
+        raise RuntimeError("OpenAI returned an empty response")
+    data = json.loads(text)
+    return _normalize_points(data.get("points", []))

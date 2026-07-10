@@ -8,6 +8,7 @@ from typing import Any
 
 STATE_PATH = Path(os.getenv("BOT_STATE_PATH", ".data/message_state.json"))
 MAX_RETAINED_MESSAGES = 200
+MAX_PROFILE_POINTS = 12
 UNPROCESSED_STATUSES = {"received", "processing", "failed"}
 VOICE_DUPLICATE_STATUSES = {"drafted", "saved"}
 
@@ -23,12 +24,14 @@ class StateStore:
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"version": 1, "messages": {}, "drafts": {}}
+            return {"version": 1, "messages": {}, "drafts": {}, "profile": {"points": []}}
         with self.path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         data.setdefault("version", 1)
         data.setdefault("messages", {})
         data.setdefault("drafts", {})
+        data.setdefault("profile", {})
+        data["profile"].setdefault("points", [])
         return data
 
     def _save(self) -> None:
@@ -208,6 +211,17 @@ class StateStore:
         if stored is None or value is None:
             return True
         return int(stored) == int(value)
+
+    def get_profile_points(self) -> list[str]:
+        return list(self.data["profile"].get("points", []))
+
+    def set_profile_points(self, points: list[str]) -> None:
+        cleaned = [point.strip() for point in points if isinstance(point, str) and point.strip()]
+        self.data["profile"] = {
+            "points": cleaned[:MAX_PROFILE_POINTS],
+            "updated_at": _now(),
+        }
+        self._save()
 
     def save_draft(self, draft: dict[str, Any]) -> None:
         stored = deepcopy(draft)

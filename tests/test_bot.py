@@ -1223,15 +1223,22 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         draft = {"id": "entry-1", "text": "got nothing done today", "chat_id": 123}
 
         captured = []
+        captured_points = []
 
-        async def fake_roast(messages):
+        async def fake_roast(messages, points=None):
             captured.append([dict(m) for m in messages])
+            captured_points.append(points)
             return "Roast ready."
 
         with patch.object(bot.roast, "is_configured", lambda: True), \
-                patch.object(bot.roast, "roast", new=fake_roast):
+                patch.object(bot.roast, "roast", new=fake_roast), \
+                patch.object(bot.state_store, "get_profile_points", return_value=["knows guitar"]), \
+                patch.object(bot, "_update_profile_points", new=AsyncMock()) as fake_update:
             await bot._roast_draft(query, context, draft)
 
+        # Stored profile points ride along as context, and the entry is queued for a profile refresh.
+        self.assertEqual(captured_points, [["knows guitar"]])
+        fake_update.assert_awaited_once_with("got nothing done today")
         self.assertEqual(captured, [[{"role": "user", "content": "got nothing done today"}]])
         # Status message (id 1001) was edited into the answer.
         self.assertEqual(fake_bot.edits[-1]["text"], "Roast ready.")
@@ -1251,6 +1258,23 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
 
         reply_text.assert_awaited_once()
         self.assertIn("ANTHROPIC_API_KEY", reply_text.await_args.args[0])
+
+    async def test_update_profile_points_extracts_and_persists(self):
+        with patch.object(bot.state_store, "get_profile_points", return_value=["old fact"]), \
+                patch.object(bot.roast, "extract_profile_points", new=AsyncMock(return_value=["fresh fact"])) as extract, \
+                patch.object(bot.state_store, "set_profile_points") as save:
+            await bot._update_profile_points("today's entry")
+
+        extract.assert_awaited_once_with("today's entry", ["old fact"])
+        save.assert_called_once_with(["fresh fact"])
+
+    async def test_update_profile_points_swallows_failures(self):
+        with patch.object(bot.state_store, "get_profile_points", return_value=[]), \
+                patch.object(bot.roast, "extract_profile_points", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+                patch.object(bot.state_store, "set_profile_points") as save:
+            await bot._update_profile_points("entry")
+
+        save.assert_not_called()
 
     async def test_reply_to_roast_message_continues_conversation(self):
         fake_bot = FakeRoastBot()
@@ -1274,11 +1298,12 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
 
         captured = []
 
-        async def fake_roast(messages):
+        async def fake_roast(messages, points=None):
             captured.append([dict(m) for m in messages])
             return "answer to the question"
 
         with patch.object(bot.roast, "roast", new=fake_roast), \
+                patch.object(bot.state_store, "get_profile_points", return_value=[]), \
                 patch.object(bot, "handle_text", new=AsyncMock()) as fake_handle_text:
             await bot.receive_edit_reply(update, context)
 
@@ -1306,7 +1331,9 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         long_answer = "a" * (bot.TELEGRAM_MESSAGE_LIMIT + 500)
 
         with patch.object(bot.roast, "is_configured", lambda: True), \
-                patch.object(bot.roast, "roast", new=AsyncMock(return_value=long_answer)):
+                patch.object(bot.roast, "roast", new=AsyncMock(return_value=long_answer)), \
+                patch.object(bot.state_store, "get_profile_points", return_value=[]), \
+                patch.object(bot, "_update_profile_points", new=AsyncMock()):
             await bot._roast_draft(query, context, draft)
 
         # Answer split into 2 chunks: status edit (id 1001) + one new reply (id 1002).
