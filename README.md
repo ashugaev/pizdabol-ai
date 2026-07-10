@@ -71,6 +71,8 @@ The preview shows a **🔥 Roast** button next to **Save**. Pressing it sends th
 
 The conversation continues by replying: reply to any roast message and the bot sends the whole prior chain plus your reply back to the model, so you can ask follow-up questions and keep the thread going. These conversations live in RAM only and are discarded when the bot restarts.
 
+After each roast, the bot distills a compact **author profile** — a short set of one-sentence facts about who you are (values, habits, relationships, recurring patterns). These points are persisted in local state, merged and deduped on every roast, and fed back as background context on the next roast so the model keeps getting to know you. The list is capped and kept terse; it stores durable context, not a retelling of any single entry. Use `OPENAI_PROFILE_MODEL` (defaults to `OPENAI_SUMMARY_MODEL`) to pick the model that maintains it.
+
 The system prompt is built in (Russian street-bro persona) but can be replaced with `ROAST_SYSTEM_PROMPT`, and the model with `OPENAI_ROAST_MODEL` (defaults to a high-reasoning model). Set `ROAST_LANGUAGE` (defaults to `Russian`) to make the model reply in a specific language regardless of the diary entry's language.
 
 ### Tags
@@ -139,6 +141,7 @@ cp .env.example .env
 | `OPENAI_TRANSCRIPTION_MODEL` | Optional. Speech-to-text model, defaults to `whisper-1`     |
 | `OPENAI_FORMATTER_MODEL` | Optional. Formatting model, defaults to `gpt-5.4-mini`          |
 | `OPENAI_SUMMARY_MODEL`   | Optional. Summary model, defaults to `OPENAI_FORMATTER_MODEL`   |
+| `OPENAI_PROFILE_MODEL`   | Optional. Model that maintains the roast author profile, defaults to `OPENAI_SUMMARY_MODEL` |
 | `NOTION_TOKEN`       | Internal integration secret from notion.so/profile/integrations    |
 | `NOTION_DATABASE_ID` | ID from the database URL: `notion.so/workspace/{ID}?v=...`        |
 | `ALLOWED_USER_ID`    | Your Telegram user ID — get it from [@userinfobot](https://t.me/userinfobot) |

@@ -56,6 +56,22 @@ class StateStoreTests(unittest.TestCase):
             store.remove_draft("entry-1")
             self.assertIsNone(store.get_draft("entry-1"))
 
+    def test_profile_points_default_persist_clean_and_cap(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state.json"
+            store = StateStore(path)
+            self.assertEqual(store.get_profile_points(), [])
+
+            store.set_profile_points(["  likes hiking ", "", "avoids conflict", 5])
+            self.assertEqual(store.get_profile_points(), ["likes hiking", "avoids conflict"])
+
+            # Persisted and reloaded from disk.
+            self.assertEqual(StateStore(path).get_profile_points(), ["likes hiking", "avoids conflict"])
+
+            over = [f"fact {i}" for i in range(state_store_module.MAX_PROFILE_POINTS + 3)]
+            store.set_profile_points(over)
+            self.assertEqual(len(store.get_profile_points()), state_store_module.MAX_PROFILE_POINTS)
+
     def test_recent_unprocessed_messages_returns_oldest_to_newest_within_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             store = StateStore(Path(tmpdir) / "state.json")

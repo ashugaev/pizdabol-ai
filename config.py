@@ -57,6 +57,7 @@ class _Settings:
     openai_transcription_model: str = _optional_env("OPENAI_TRANSCRIPTION_MODEL", "whisper-1")
     openai_formatter_model: str = _optional_env("OPENAI_FORMATTER_MODEL", "gpt-5.4-mini")
     openai_summary_model: str = _optional_env("OPENAI_SUMMARY_MODEL", openai_formatter_model)
+    openai_profile_model: str = _optional_env("OPENAI_PROFILE_MODEL", openai_summary_model)
     notion_token: str = _required_env("NOTION_TOKEN")
     notion_database_id: str = _required_env("NOTION_DATABASE_ID")
     allowed_user_id: int = _required_int("ALLOWED_USER_ID")

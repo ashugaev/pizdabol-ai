@@ -661,9 +661,20 @@ async def _deliver_roast(reply_target, chain: list[dict], context, status_messag
     return sent_messages[-1]
 
 
-async def _run_roast(reply_target, chain: list[dict], context, status_message=None) -> None:
+async def _update_profile_points(diary_text: str) -> None:
+    """Best-effort: refresh the persisted author profile from a diary entry.
+    Never blocks or breaks the roast flow — failures are logged and swallowed."""
     try:
-        answer = await roast.roast(chain)
+        existing = state_store.get_profile_points()
+        points = await roast.extract_profile_points(diary_text, existing)
+        state_store.set_profile_points(points)
+    except Exception:
+        logger.exception("Failed to update roast profile points")
+
+
+async def _run_roast(reply_target, chain: list[dict], context, status_message=None, points=None) -> None:
+    try:
+        answer = await roast.roast(chain, points=points)
     except Exception as e:
         logger.exception("Error generating roast")
         error_text = f"Roast failed: {e}"
@@ -688,7 +699,9 @@ async def _roast_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) -
 
     status = await _reply_to_source(query.message, "🔥 Roasting...")
     chain = [{"role": "user", "content": text}]
-    await _run_roast(query.message, chain, context, status_message=status)
+    points = state_store.get_profile_points()
+    await _run_roast(query.message, chain, context, status_message=status, points=points)
+    await _update_profile_points(text)
 
 
 async def _handle_roast_followup(update: Update, context: ContextTypes.DEFAULT_TYPE, chain_key: str) -> None:
@@ -701,7 +714,8 @@ async def _handle_roast_followup(update: Update, context: ContextTypes.DEFAULT_T
 
     new_chain = list(chain) + [{"role": "user", "content": reply_text}]
     status = await _reply_to_source(user_msg, "🔥 Thinking...")
-    await _run_roast(user_msg, new_chain, context, status_message=status)
+    points = state_store.get_profile_points()
+    await _run_roast(user_msg, new_chain, context, status_message=status, points=points)
 
 
 async def replay_unprocessed_messages(application: Application) -> None:

@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from types import SimpleNamespace
@@ -104,6 +105,60 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(roast.settings, "openai_api_key", ""):
             with self.assertRaisesRegex(RuntimeError, "OPENAI_API_KEY is not configured"):
                 await roast.roast([{"role": "user", "content": "x"}])
+
+    async def test_roast_injects_profile_points_into_system_prompt(self):
+        fake = FakeOpenAI(_chat_response("ok"))
+
+        with patch.object(roast.settings, "openai_api_key", "key"), \
+                patch.object(roast.settings, "roast_language", ""), \
+                patch.object(roast, "client", fake):
+            await roast.roast([{"role": "user", "content": "x"}], points=["likes hiking", "avoids conflict"])
+
+        system = fake.chat.completions.calls[0]["messages"][0]["content"]
+        self.assertTrue(system.startswith(roast.DEFAULT_SYSTEM_PROMPT))
+        self.assertIn("- likes hiking", system)
+        self.assertIn("- avoids conflict", system)
+
+    async def test_extract_profile_points_parses_normalizes_and_dedupes(self):
+        raw = json.dumps({"points": [
+            "  likes   hiking  ",
+            "likes hiking",
+            "",
+            42,
+            "x" * (roast.MAX_PROFILE_POINT_LENGTH + 20),
+        ]})
+        fake = FakeOpenAI(_chat_response(raw))
+
+        with patch.object(roast.settings, "openai_api_key", "key"), \
+                patch.object(roast, "client", fake):
+            points = await roast.extract_profile_points("entry text", ["known fact"])
+
+        self.assertEqual(points[0], "likes hiking")
+        self.assertEqual(len(points), 2)  # deduped and empties/non-strings dropped
+        self.assertTrue(all(len(p) <= roast.MAX_PROFILE_POINT_LENGTH for p in points))
+
+        kwargs = fake.chat.completions.calls[0]
+        self.assertEqual(kwargs["model"], roast.settings.openai_profile_model)
+        self.assertEqual(kwargs["response_format"], {"type": "json_object"})
+        self.assertIn("known fact", kwargs["messages"][1]["content"])
+
+    async def test_extract_profile_points_caps_count(self):
+        raw = json.dumps({"points": [f"fact {i}" for i in range(roast.MAX_PROFILE_POINTS + 5)]})
+        fake = FakeOpenAI(_chat_response(raw))
+
+        with patch.object(roast.settings, "openai_api_key", "key"), \
+                patch.object(roast, "client", fake):
+            points = await roast.extract_profile_points("entry", [])
+
+        self.assertEqual(len(points), roast.MAX_PROFILE_POINTS)
+
+    async def test_extract_profile_points_raises_when_empty(self):
+        fake = FakeOpenAI(_chat_response(""))
+
+        with patch.object(roast.settings, "openai_api_key", "key"), \
+                patch.object(roast, "client", fake):
+            with self.assertRaisesRegex(RuntimeError, "empty response"):
+                await roast.extract_profile_points("entry", [])
 
     def test_is_configured_reflects_api_key(self):
         with patch.object(roast.settings, "openai_api_key", "key"):
