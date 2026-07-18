@@ -55,7 +55,7 @@ class _Settings:
     telegram_token: str = _required_env("TELEGRAM_TOKEN")
     openai_api_key: str = _required_env("OPENAI_API_KEY")
     openai_transcription_model: str = _optional_env("OPENAI_TRANSCRIPTION_MODEL", "whisper-1")
-    openai_formatter_model: str = _optional_env("OPENAI_FORMATTER_MODEL", "gpt-5.4-mini")
+    openai_formatter_model: str = _optional_env("OPENAI_FORMATTER_MODEL", "gpt-5.6-luna")
     openai_summary_model: str = _optional_env("OPENAI_SUMMARY_MODEL", openai_formatter_model)
     openai_profile_model: str = _optional_env("OPENAI_PROFILE_MODEL", openai_summary_model)
     notion_token: str = _required_env("NOTION_TOKEN")
@@ -64,7 +64,7 @@ class _Settings:
     timezone: str = _timezone()
     diary_day_start_hour: int = _diary_day_start_hour()
     silent_notifications: bool = _optional_bool("SILENT_NOTIFICATIONS", True)
-    openai_roast_model: str = _optional_env("OPENAI_ROAST_MODEL", "gpt-5.4")
+    openai_roast_model: str = _optional_env("OPENAI_ROAST_MODEL", "gpt-5.6")
     roast_language: str = _optional_env("ROAST_LANGUAGE", "Russian").strip()
     roast_system_prompt: str = os.getenv("ROAST_SYSTEM_PROMPT", "").strip()
 

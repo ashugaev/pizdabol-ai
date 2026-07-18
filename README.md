@@ -139,7 +139,7 @@ cp .env.example .env
 | `TELEGRAM_TOKEN`     | Bot token from [@BotFather](https://t.me/BotFather)               |
 | `OPENAI_API_KEY`     | OpenAI API key (used for transcription, formatting, and summaries) |
 | `OPENAI_TRANSCRIPTION_MODEL` | Optional. Speech-to-text model, defaults to `whisper-1`     |
-| `OPENAI_FORMATTER_MODEL` | Optional. Formatting model, defaults to `gpt-5.4-mini`          |
+| `OPENAI_FORMATTER_MODEL` | Optional. Formatting model, defaults to `gpt-5.6-luna`          |
 | `OPENAI_SUMMARY_MODEL`   | Optional. Summary model, defaults to `OPENAI_FORMATTER_MODEL`   |
 | `OPENAI_PROFILE_MODEL`   | Optional. Model that maintains the roast author profile, defaults to `OPENAI_SUMMARY_MODEL` |
 | `NOTION_TOKEN`       | Internal integration secret from notion.so/profile/integrations    |
@@ -148,7 +148,7 @@ cp .env.example .env
 | `TIMEZONE`           | Your timezone, e.g. `Asia/Bangkok`, `Europe/Moscow`                |
 | `DIARY_DAY_START_HOUR` | Optional. Hour when the diary day starts in `TIMEZONE`, `0`-`23`; defaults to `0` |
 | `SILENT_NOTIFICATIONS` | Optional. Send all messages silently (no push notifications), defaults to `true` |
-| `OPENAI_ROAST_MODEL` | Optional. High-reasoning model behind the **🔥 Roast** (разъёб) button, defaults to `gpt-5.4` |
+| `OPENAI_ROAST_MODEL` | Optional. High-reasoning model behind the **🔥 Roast** (разъёб) button, defaults to `gpt-5.6` |
 | `ROAST_LANGUAGE`     | Optional. Language the roast replies in, e.g. `Russian`, `English`; defaults to `Russian` |
 | `ROAST_SYSTEM_PROMPT` | Optional. Overrides the built-in roast (разъёб) system prompt |
 
