@@ -1,8 +1,6 @@
-import json
-import httpx
 import openai
 from config import settings
-from services.notion import API, HEADERS, NOTION_TIMEOUT, extract_page_title, get_today_pages, get_week_pages
+from services.notion import extract_page_title, get_page_text, get_today_pages, get_week_pages
 from services.stats import build_period_stats_from_pages, format_daily_stats, format_weekly_stats
 
 openai_client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
@@ -16,23 +14,7 @@ SUMMARY_PROMPT = """Ты — чёткий братан автора, помог�
 
 async def _fetch_page_text(page_id: str) -> str:
     """Fetches all text blocks from a Notion page and returns them as plain text."""
-    async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        resp = await http.get(
-            f"{API}/blocks/{page_id}/children",
-            headers=HEADERS,
-        )
-        resp.raise_for_status()
-        blocks = resp.json().get("results", [])
-
-    lines = []
-    for block in blocks:
-        block_type = block.get("type")
-        rich_text = block.get(block_type, {}).get("rich_text", [])
-        text = "".join(t["plain_text"] for t in rich_text)
-        if text:
-            lines.append(text)
-
-    return "\n\n".join(lines)
+    return await get_page_text(page_id)
 
 
 WEEKLY_PROMPT = """Ты — чёткий братан автора, помогаешь ему оглянуться на прошедшую неделю.

@@ -303,7 +303,11 @@ class ReplyToSourceTests(unittest.IsolatedAsyncioTestCase):
 class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
     async def test_create_preview_edits_existing_processing_reply_and_persists_draft(self):
         fake_state_store = FakeStateStore()
-        fake_context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        fake_context = SimpleNamespace(
+            bot=FakeEditBot(),
+            user_data={},
+            application=FakeApplication(close_coroutines=True),
+        )
         source_message = SimpleNamespace(chat_id=123, message_id=10)
         processing_message = SimpleNamespace(chat_id=123, message_id=20)
         fake_state_store.messages["123:10"] = {
@@ -320,6 +324,7 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, "format_entry", new=fake_formatter),
             patch.object(bot, "_new_entry_id", return_value="entry-1"),
             patch.object(bot, "state_store", fake_state_store),
+            patch.object(bot, "_update_profile_points", new=AsyncMock()),
         ):
             await bot._create_preview(
                 source_message,
@@ -353,7 +358,11 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_preview_sends_new_reply_when_no_processing_message_exists(self):
         fake_state_store = FakeStateStore()
-        fake_context = SimpleNamespace(bot=FakeSendBot(), user_data={})
+        fake_context = SimpleNamespace(
+            bot=FakeSendBot(),
+            user_data={},
+            application=FakeApplication(close_coroutines=True),
+        )
         source_message = SimpleNamespace(
             chat_id=123,
             message_id=10,
@@ -365,6 +374,7 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, "format_entry", new=fake_formatter),
             patch.object(bot, "_new_entry_id", return_value="entry-2"),
             patch.object(bot, "state_store", fake_state_store),
+            patch.object(bot, "_update_profile_points", new=AsyncMock()),
         ):
             await bot._create_preview(source_message, fake_context, "plain text")
 
@@ -377,7 +387,11 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_preview_keeps_full_text_when_telegram_preview_is_truncated(self):
         fake_state_store = FakeStateStore()
-        fake_context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        fake_context = SimpleNamespace(
+            bot=FakeEditBot(),
+            user_data={},
+            application=FakeApplication(close_coroutines=True),
+        )
         source_message = SimpleNamespace(chat_id=123, message_id=10)
         processing_message = SimpleNamespace(chat_id=123, message_id=20)
         long_text = "x" * (bot.TELEGRAM_MESSAGE_LIMIT + 500)
@@ -387,6 +401,7 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, "format_entry", new=fake_formatter),
             patch.object(bot, "_new_entry_id", return_value="entry-long"),
             patch.object(bot, "state_store", fake_state_store),
+            patch.object(bot, "_update_profile_points", new=AsyncMock()),
         ):
             await bot._create_preview(
                 source_message,
@@ -414,7 +429,11 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_create_preview_hides_format_when_formatted_text_matches_raw_text(self):
         fake_state_store = FakeStateStore()
-        fake_context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        fake_context = SimpleNamespace(
+            bot=FakeEditBot(),
+            user_data={},
+            application=FakeApplication(close_coroutines=True),
+        )
         source_message = SimpleNamespace(chat_id=123, message_id=10)
         processing_message = SimpleNamespace(chat_id=123, message_id=20)
         fake_formatter = AsyncMock(return_value=("Title", "raw transcription", []))
@@ -423,6 +442,7 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
             patch.object(bot, "format_entry", new=fake_formatter),
             patch.object(bot, "_new_entry_id", return_value="entry-raw"),
             patch.object(bot, "state_store", fake_state_store),
+            patch.object(bot, "_update_profile_points", new=AsyncMock()),
         ):
             await bot._create_preview(
                 source_message,
@@ -439,6 +459,34 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
             for button in row
         ]
         self.assertNotIn("format:entry-raw", callback_data)
+
+    async def test_create_preview_schedules_profile_refresh(self):
+        fake_state_store = FakeStateStore()
+        fake_context = SimpleNamespace(
+            bot=FakeEditBot(),
+            user_data={},
+            application=FakeApplication(close_coroutines=True),
+        )
+        source_message = SimpleNamespace(chat_id=123, message_id=10)
+        processing_message = SimpleNamespace(chat_id=123, message_id=20)
+        fake_formatter = AsyncMock(return_value=("Title", "Body", []))
+
+        with (
+            patch.object(bot, "format_entry", new=fake_formatter),
+            patch.object(bot, "_new_entry_id", return_value="entry-refresh"),
+            patch.object(bot, "state_store", fake_state_store),
+            patch.object(bot, "_update_profile_points", new=AsyncMock()) as fake_update,
+        ):
+            await bot._create_preview(
+                source_message,
+                fake_context,
+                "plain text",
+                message_key="123:10",
+                preview_message=processing_message,
+            )
+
+        self.assertEqual(len(fake_context.application.created_tasks), 1)
+        fake_update.assert_called_once_with("plain text")
 
 
 class DuplicateVoiceFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -1236,9 +1284,10 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(bot, "_update_profile_points", new=AsyncMock()) as fake_update:
             await bot._roast_draft(query, context, draft)
 
-        # Stored profile points ride along as context, and the entry is queued for a profile refresh.
+        # Stored profile points ride along as context; roast no longer triggers a profile refresh
+        # (extraction happens once at message ingestion).
         self.assertEqual(captured_points, [["knows guitar"]])
-        fake_update.assert_awaited_once_with("got nothing done today")
+        fake_update.assert_not_awaited()
         self.assertEqual(captured, [[{"role": "user", "content": "got nothing done today"}]])
         # Status message (id 1001) was edited into the answer.
         self.assertEqual(fake_bot.edits[-1]["text"], "Roast ready.")
