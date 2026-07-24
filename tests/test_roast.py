@@ -102,8 +102,8 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
                 await roast.roast([{"role": "user", "content": "x"}])
 
     async def test_roast_raises_when_not_configured(self):
-        with patch.object(roast.settings, "openai_api_key", ""):
-            with self.assertRaisesRegex(RuntimeError, "OPENAI_API_KEY is not configured"):
+        with patch.object(roast.settings, "ai_api_key", ""):
+            with self.assertRaisesRegex(RuntimeError, "API key is not configured"):
                 await roast.roast([{"role": "user", "content": "x"}])
 
     async def test_roast_injects_profile_points_into_system_prompt(self):
@@ -161,9 +161,9 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
                 await roast.extract_profile_points("entry", [])
 
     def test_is_configured_reflects_api_key(self):
-        with patch.object(roast.settings, "openai_api_key", "key"):
+        with patch.object(roast.settings, "ai_api_key", "key"):
             self.assertTrue(roast.is_configured())
-        with patch.object(roast.settings, "openai_api_key", ""):
+        with patch.object(roast.settings, "ai_api_key", ""):
             self.assertFalse(roast.is_configured())
 
 

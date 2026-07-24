@@ -1,9 +1,8 @@
 import json
 import logging
 
-import openai
-
 from config import settings
+from services.ai import create_chat_client
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,7 @@ DEFAULT_SYSTEM_PROMPT = """Ты — чёткий пацан, братан авт
 
 
 def is_configured() -> bool:
-    return bool(settings.openai_api_key)
+    return bool(settings.ai_api_key)
 
 
 def system_prompt(points: list[str] | None = None) -> str:
@@ -64,7 +63,7 @@ def system_prompt(points: list[str] | None = None) -> str:
     return base
 
 
-client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+client = create_chat_client()
 
 
 def _extract_text(response) -> str:
@@ -81,17 +80,17 @@ def _trim_chain(messages: list[dict]) -> list[dict]:
 
 async def roast(messages: list[dict], points: list[str] | None = None) -> str:
     if not is_configured():
-        raise RuntimeError("OPENAI_API_KEY is not configured")
+        raise RuntimeError("AI provider API key is not configured")
 
     response = await client.chat.completions.create(
-        model=settings.openai_roast_model,
+        model=settings.roast_model,
         max_completion_tokens=ROAST_MAX_COMPLETION_TOKENS,
         reasoning_effort=ROAST_REASONING_EFFORT,
         messages=[{"role": "system", "content": system_prompt(points)}] + _trim_chain(messages),
     )
     text = _extract_text(response)
     if not text:
-        raise RuntimeError("OpenAI returned an empty response")
+        raise RuntimeError("AI provider returned an empty response")
     return text
 
 
@@ -120,14 +119,14 @@ async def extract_profile_points(diary_text: str, existing_points: list[str] | N
     """Distill a compact, deduped set of durable facts about the author from a diary
     entry, merged with what is already known. Returns the normalized full list."""
     if not is_configured():
-        raise RuntimeError("OPENAI_API_KEY is not configured")
+        raise RuntimeError("AI provider API key is not configured")
 
     payload = json.dumps(
         {"diary_entry": diary_text, "known_facts": existing_points or []},
         ensure_ascii=False,
     )
     response = await client.chat.completions.create(
-        model=settings.openai_profile_model,
+        model=settings.profile_model,
         max_completion_tokens=PROFILE_MAX_COMPLETION_TOKENS,
         response_format={"type": "json_object"},
         messages=[
@@ -137,6 +136,6 @@ async def extract_profile_points(diary_text: str, existing_points: list[str] | N
     )
     text = _extract_text(response)
     if not text:
-        raise RuntimeError("OpenAI returned an empty response")
+        raise RuntimeError("AI provider returned an empty response")
     data = json.loads(text)
     return _normalize_points(data.get("points", []))

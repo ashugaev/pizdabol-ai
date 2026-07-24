@@ -1,10 +1,10 @@
 import json
 import logging
 
-import openai
 from config import settings
+from services.ai import create_chat_client
 
-client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+client = create_chat_client()
 logger = logging.getLogger(__name__)
 
 LONG_TRANSCRIPTION_CHAR_LIMIT = 6000
@@ -70,7 +70,7 @@ def _parse_json(content: str) -> dict:
 async def format_entry(transcription: str) -> tuple[str, str, list[str]]:
     if len(transcription) > LONG_TRANSCRIPTION_CHAR_LIMIT:
         response = await client.chat.completions.create(
-            model=settings.openai_formatter_model,
+            model=settings.formatter_model,
             max_completion_tokens=METADATA_MAX_COMPLETION_TOKENS,
             response_format={"type": "json_object"},
             messages=[
@@ -83,7 +83,7 @@ async def format_entry(transcription: str) -> tuple[str, str, list[str]]:
         return title, transcription, _coerce_tags(data.get("tags"))
 
     response = await client.chat.completions.create(
-        model=settings.openai_formatter_model,
+        model=settings.formatter_model,
         max_completion_tokens=FORMATTER_MAX_COMPLETION_TOKENS,
         response_format={"type": "json_object"},
         messages=[

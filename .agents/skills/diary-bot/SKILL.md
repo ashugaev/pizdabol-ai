@@ -13,9 +13,10 @@ Use this as project memory for implementation and validation.
 |---|---|
 | Telegram update flow, drafts, callbacks, scheduling | `bot.py` |
 | Environment parsing and defaults | `config.py`, `.env.example` |
-| OpenAI formatting | `services/formatter.py`, `tests/test_openai_services.py` |
-| OpenAI transcription | `services/whisper.py`, `tests/test_openai_services.py` |
-| OpenAI daily and weekly summaries | `services/summary.py`, `tests/test_openai_services.py` |
+| AI provider selection (OpenAI/Anthropic) for chat tasks | `services/ai.py`, `tests/test_anthropic_provider.py` |
+| Chat formatting (provider-neutral) | `services/formatter.py`, `tests/test_openai_services.py` |
+| OpenAI transcription (always OpenAI, no Anthropic equivalent) | `services/whisper.py`, `tests/test_openai_services.py` |
+| Daily and weekly summaries (provider-neutral) | `services/summary.py`, `tests/test_openai_services.py` |
 | Notion schema, retries, duplicate checks, writes | `services/notion.py`, `tests/test_notion.py` |
 | Local message and draft state | `services/state_store.py`, `tests/test_state_store.py` |
 | Dev, test, deploy commands | `Makefile`, `README.md`, `.github/workflows/ci.yml` |
