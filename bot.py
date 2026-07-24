@@ -701,7 +701,6 @@ async def _roast_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) -
     chain = [{"role": "user", "content": text}]
     points = state_store.get_profile_points()
     await _run_roast(query.message, chain, context, status_message=status, points=points)
-    await _update_profile_points(text)
 
 
 async def _handle_roast_followup(update: Update, context: ContextTypes.DEFAULT_TYPE, chain_key: str) -> None:
@@ -1011,6 +1010,8 @@ async def _create_preview(
     state_store.save_draft(_drafts(context)[entry_id])
     if message_key:
         state_store.mark_message_drafted(message_key, entry_id)
+    if source_text and source_text.strip():
+        context.application.create_task(_update_profile_points(source_text))
 
 
 def _callback_payload(update: Update) -> tuple[str, str] | tuple[None, None]:

@@ -2,6 +2,8 @@ HOST=root@146.190.110.77
 APP_DIR=/opt/noter
 PYTHON ?= .venv/bin/python
 
+.PHONY: deploy dev stop-dev test backfill-profile
+
 deploy:
 	git push
 	ssh $(HOST) "cd $(APP_DIR) && git pull && systemctl restart noter && systemctl status noter --no-pager"
@@ -14,5 +16,8 @@ stop-dev:
 	ssh $(HOST) "systemctl start noter"
 
 test:
-	$(PYTHON) -m py_compile bot.py config.py services/*.py tests/*.py
+	$(PYTHON) -m py_compile bot.py config.py services/*.py scripts/*.py tests/*.py
 	$(PYTHON) -m unittest discover -s tests -v
+
+backfill-profile:
+	$(PYTHON) -m scripts.backfill_profile
