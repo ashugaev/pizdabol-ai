@@ -50,7 +50,7 @@ Daily sport health
 [            Cancel              ]
 ```
 
-The **🔥 Roast** button is available whenever `OPENAI_API_KEY` is set (see below).
+The **🔥 Roast** button is available whenever the active AI provider's API key is set (see `AI_PROVIDER` below).
 
 The preview is a reply to the original voice message, so it stays threaded with the audio being processed. Clicking an edit button prompts you to send a new value. After you send it, the same preview message updates in place.
 Clicking **Format** replaces only the draft text with the formatter's cleaned text, split into semantic paragraphs (saved as separate Notion blocks). The cleaned text only fixes recognition/grammar slips without changing your wording or meaning. The title and tags are already applied before the click. After formatting, the button becomes **↺ Original** so you can revert to the untouched text. You can skip it and save the original transcription.
@@ -139,20 +139,37 @@ cp .env.example .env
 | Variable             | Description                                                        |
 |----------------------|--------------------------------------------------------------------|
 | `TELEGRAM_TOKEN`     | Bot token from [@BotFather](https://t.me/BotFather)               |
-| `OPENAI_API_KEY`     | OpenAI API key (used for transcription, formatting, and summaries) |
+| `AI_PROVIDER`        | Optional. Chat provider for formatting, summaries, and roast: `openai` (default) or `anthropic` |
+| `OPENAI_API_KEY`     | OpenAI API key. **Always required** — audio transcription (Whisper) is OpenAI-only, even when `AI_PROVIDER=anthropic` |
+| `ANTHROPIC_API_KEY`  | Anthropic API key. Required only when `AI_PROVIDER=anthropic`       |
 | `OPENAI_TRANSCRIPTION_MODEL` | Optional. Speech-to-text model, defaults to `whisper-1`     |
-| `OPENAI_FORMATTER_MODEL` | Optional. Formatting model, defaults to `gpt-5.6-luna`          |
-| `OPENAI_SUMMARY_MODEL`   | Optional. Summary model, defaults to `OPENAI_FORMATTER_MODEL`   |
-| `OPENAI_PROFILE_MODEL`   | Optional. Model that maintains the roast author profile, defaults to `OPENAI_SUMMARY_MODEL` |
+| `OPENAI_FORMATTER_MODEL` | Optional. Formatting model (OpenAI mode), defaults to `gpt-5.6-luna` |
+| `OPENAI_SUMMARY_MODEL`   | Optional. Summary model (OpenAI mode), defaults to `OPENAI_FORMATTER_MODEL` |
+| `OPENAI_PROFILE_MODEL`   | Optional. Roast author-profile model (OpenAI mode), defaults to `OPENAI_SUMMARY_MODEL` |
+| `OPENAI_ROAST_MODEL` | Optional. Roast model (OpenAI mode), defaults to `gpt-5.6`          |
+| `ANTHROPIC_FORMATTER_MODEL` | Optional. Formatting model (Anthropic mode), defaults to `claude-opus-4-8` |
+| `ANTHROPIC_SUMMARY_MODEL`   | Optional. Summary model (Anthropic mode), defaults to `ANTHROPIC_FORMATTER_MODEL` |
+| `ANTHROPIC_PROFILE_MODEL`   | Optional. Roast author-profile model (Anthropic mode), defaults to `ANTHROPIC_SUMMARY_MODEL` |
+| `ANTHROPIC_ROAST_MODEL` | Optional. Roast model (Anthropic mode), defaults to `claude-opus-4-8` |
 | `NOTION_TOKEN`       | Internal integration secret from notion.so/profile/integrations    |
 | `NOTION_DATABASE_ID` | ID from the database URL: `notion.so/workspace/{ID}?v=...`        |
 | `ALLOWED_USER_ID`    | Your Telegram user ID — get it from [@userinfobot](https://t.me/userinfobot) |
 | `TIMEZONE`           | Your timezone, e.g. `Asia/Bangkok`, `Europe/Moscow`                |
 | `DIARY_DAY_START_HOUR` | Optional. Hour when the diary day starts in `TIMEZONE`, `0`-`23`; defaults to `0` |
 | `SILENT_NOTIFICATIONS` | Optional. Send all messages silently (no push notifications), defaults to `true` |
-| `OPENAI_ROAST_MODEL` | Optional. High-reasoning model behind the **🔥 Roast** (разъёб) button, defaults to `gpt-5.6` |
 | `ROAST_LANGUAGE`     | Optional. Language the roast replies in, e.g. `Russian`, `English`; defaults to `Russian` |
 | `ROAST_SYSTEM_PROMPT` | Optional. Overrides the built-in roast (разъёб) system prompt |
+
+### Switching AI provider
+
+Formatting, daily/weekly summaries, and the **🔥 Roast** run through whichever provider `AI_PROVIDER` selects. To use Anthropic instead of OpenAI, set:
+
+```bash
+AI_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+No code changes are needed — restart the bot and the switch takes effect. Audio transcription always uses OpenAI Whisper, so `OPENAI_API_KEY` stays required in both modes.
 
 ### Connecting Notion integration to your database
 

@@ -1,9 +1,9 @@
-import openai
 from config import settings
+from services.ai import create_chat_client
 from services.notion import extract_page_title, get_page_text, get_today_pages, get_week_pages
 from services.stats import build_period_stats_from_pages, format_daily_stats, format_weekly_stats
 
-openai_client = openai.AsyncOpenAI(api_key=settings.openai_api_key)
+openai_client = create_chat_client()
 
 SUMMARY_PROMPT = """Ты — чёткий братан автора, помогаешь ему оглянуться на прошедший день.
 Ниже — записи из его дневника за сегодня.
@@ -46,7 +46,7 @@ async def generate_weekly_report() -> str | None:
 
     full_text = "\n\n".join(sections)
     response = await openai_client.chat.completions.create(
-        model=settings.openai_summary_model,
+        model=settings.summary_model,
         max_completion_tokens=1024,
         messages=[
             {"role": "system", "content": WEEKLY_PROMPT},
@@ -76,7 +76,7 @@ async def generate_daily_summary() -> str | None:
     full_text = "\n\n".join(sections)
 
     response = await openai_client.chat.completions.create(
-        model=settings.openai_summary_model,
+        model=settings.summary_model,
         max_completion_tokens=512,
         messages=[
             {"role": "system", "content": SUMMARY_PROMPT},
