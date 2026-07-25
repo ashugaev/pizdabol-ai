@@ -12,7 +12,7 @@ MAX_CONVERSATION_MESSAGES = 40
 
 # Compact author profile the model maintains across roasts.
 PROFILE_MAX_COMPLETION_TOKENS = 1024
-MAX_PROFILE_POINTS = 20
+MAX_PROFILE_POINTS = 100
 MAX_PROFILE_POINT_LENGTH = 140
 
 PROFILE_EXTRACTION_PROMPT = f"""Ты ведёшь компактный профиль автора дневника, чтобы лучше понимать, кто он, и точнее его направлять.
