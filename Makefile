@@ -2,6 +2,8 @@ HOST=root@146.190.110.77
 APP_DIR=/opt/noter
 PYTHON ?= .venv/bin/python
 
+.PHONY: deploy dev stop-dev test
+
 deploy:
 	git push
 	ssh $(HOST) "cd $(APP_DIR) && git pull && systemctl restart noter && systemctl status noter --no-pager"
