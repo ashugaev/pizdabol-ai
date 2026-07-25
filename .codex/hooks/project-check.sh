@@ -47,5 +47,5 @@ print("Codex config and skills OK")
 PY
 
 if [[ -f bot.py ]]; then
-  python3 -m py_compile bot.py config.py services/*.py scripts/*.py tests/*.py
+  python3 -m py_compile bot.py config.py services/*.py tests/*.py
 fi

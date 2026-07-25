@@ -467,31 +467,6 @@ async def get_diary_pages(
             cursor = data.get("next_cursor")
 
 
-async def get_page_text(page_id: str) -> str:
-    """Fetches all text blocks from a Notion page and returns them as plain text."""
-    blocks = []
-    async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        cursor = None
-        while True:
-            url = f"{API}/blocks/{page_id}/children?page_size=100"
-            if cursor:
-                url = f"{url}&start_cursor={cursor}"
-            resp = await _request_with_retry(http, "get", url)
-            data = resp.json()
-            blocks.extend(data.get("results", []))
-            if not data.get("has_more"):
-                break
-            cursor = data.get("next_cursor")
-    lines = []
-    for block in blocks:
-        block_type = block.get("type")
-        rich_text = block.get(block_type, {}).get("rich_text", [])
-        text = "".join(t["plain_text"] for t in rich_text)
-        if text:
-            lines.append(text)
-    return "\n\n".join(lines)
-
-
 async def _verify_page_created(http: httpx.AsyncClient, page_id: str) -> None:
     resp = await _request_with_retry(
         http,

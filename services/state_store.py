@@ -8,7 +8,7 @@ from typing import Any
 
 STATE_PATH = Path(os.getenv("BOT_STATE_PATH", ".data/message_state.json"))
 MAX_RETAINED_MESSAGES = 200
-MAX_PROFILE_POINTS = 12
+MAX_PROFILE_POINTS = 20
 UNPROCESSED_STATUSES = {"received", "processing", "failed"}
 VOICE_DUPLICATE_STATUSES = {"drafted", "saved"}
 

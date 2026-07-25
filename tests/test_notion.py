@@ -411,38 +411,6 @@ class NotionSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("start_cursor", http.post_calls[0]["json"])
         self.assertEqual(http.post_calls[1]["json"]["start_cursor"], "cursor-2")
 
-    async def test_get_page_text_joins_non_empty_text_blocks(self):
-        http = FakePageTextHttp([
-            {"type": "paragraph", "paragraph": {"rich_text": [{"plain_text": "First"}]}},
-            {"type": "paragraph", "paragraph": {"rich_text": []}},
-            {"type": "heading_3", "heading_3": {"rich_text": [{"plain_text": "Second"}]}},
-        ])
-        original_client = notion.httpx.AsyncClient
-        notion.httpx.AsyncClient = lambda timeout: http
-        try:
-            text = await notion.get_page_text("page-1")
-        finally:
-            notion.httpx.AsyncClient = original_client
-
-        self.assertEqual(text, "First\n\nSecond")
-        self.assertIn("/blocks/page-1/children", http.get_calls[-1])
-
-
-class FakePageTextHttp:
-    def __init__(self, blocks):
-        self.blocks = blocks
-        self.get_calls = []
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
-
-    async def get(self, url, headers):
-        self.get_calls.append(url)
-        return FakeResponse({"results": self.blocks})
-
 
 class FakeNotionHttp:
     def __init__(self, properties):
