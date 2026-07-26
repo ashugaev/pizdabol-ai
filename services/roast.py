@@ -41,6 +41,12 @@ PROFILE_EXTRACTION_PROMPT = f"""Ты ведёшь компактный проф�
 - Пиши на русском.
 Верни СТРОГО JSON вида {{"points": ["...", "..."]}} без пояснений."""
 
+# Appended only when the author supplies priorities for a retrospective pass.
+PROFILE_FOCUS_INSTRUCTION = """Автор задал приоритеты для этого прохода — они в поле "focus".
+Считай их главным фильтром: в первую очередь вытаскивай и уточняй то, что относится к focus, и переформулируй уже известные факты под эти акценты.
+Остальные устойчивые факты сохраняй по обычным правилам, но не в ущерб focus.
+Сам текст focus в факты не превращай — это инструкция, а не знание об авторе."""
+
 DEFAULT_SYSTEM_PROMPT = """Ты — чёткий пацан, братан автора. Тебе прилетает запись из его личного дневника, и твоя работа — дать честный разъёб: срезать всю сахарную вату и вытащить наружу, что чел на самом деле чувствует и о чём молчит.
 
 Как отвечаешь:
@@ -122,22 +128,32 @@ def _normalize_points(points: list) -> list[str]:
     return result
 
 
-async def extract_profile_points(diary_text: str, existing_points: list[str] | None = None) -> list[str]:
+async def extract_profile_points(
+    diary_text: str,
+    existing_points: list[str] | None = None,
+    focus: str | None = None,
+) -> list[str]:
     """Distill a compact, deduped set of durable facts about the author from a diary
-    entry, merged with what is already known. Returns the normalized full list."""
+    entry, merged with what is already known. Returns the normalized full list.
+
+    `focus` carries the author's priorities for this extraction, if any: it steers
+    what gets pulled out and how known facts are reframed, never what is stored."""
     if not is_configured():
         raise RuntimeError("AI provider API key is not configured")
 
-    payload = json.dumps(
-        {"diary_entry": diary_text, "known_facts": existing_points or []},
-        ensure_ascii=False,
-    )
+    request = {"diary_entry": diary_text, "known_facts": existing_points or []}
+    system_prompt = PROFILE_EXTRACTION_PROMPT
+    if focus:
+        request["focus"] = focus
+        system_prompt = f"{system_prompt}\n\n{PROFILE_FOCUS_INSTRUCTION}"
+
+    payload = json.dumps(request, ensure_ascii=False)
     response = await client.chat.completions.create(
         model=settings.profile_model,
         max_completion_tokens=PROFILE_MAX_COMPLETION_TOKENS,
         response_format={"type": "json_object"},
         messages=[
-            {"role": "system", "content": PROFILE_EXTRACTION_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": payload},
         ],
     )

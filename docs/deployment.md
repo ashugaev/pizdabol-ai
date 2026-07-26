@@ -70,6 +70,7 @@ services/
 ├── notion.py           # Notion API: create/read diary pages
 ├── summary.py          # Daily summary & weekly report
 ├── roast.py            # Roast mode + author profile
+├── profile_rebuild.py  # Sequential profile rebuild over all notes (/memory)
 ├── stats.py            # Audio-minute stats
 ├── state_store.py      # Local JSON state (messages, drafts, profile)
 └── diary_dates.py      # Diary-day date logic

@@ -30,6 +30,7 @@ You'll need a Telegram bot token, an OpenAI API key, and a Notion integration + 
 | `/help` | Usage instructions |
 | `/weekly` | Generate the weekly highlight report now |
 | `/stat` | Saved audio minutes overall, by day, and by month |
+| `/memory` | Rebuild the author profile from every saved note, guided by focus points you supply |
 
 ## Docs
 

@@ -154,6 +154,31 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(points), count)  # count is guided at the prompt level, never capped mechanically
 
+    async def test_extract_profile_points_passes_focus_to_the_model(self):
+        fake = FakeOpenAI(_chat_response(json.dumps({"points": ["fact"]})))
+
+        with patch.object(roast.settings, "openai_api_key", "key"), \
+                patch.object(roast, "client", fake):
+            await roast.extract_profile_points("entry", ["known"], focus="work and health")
+
+        kwargs = fake.chat.completions.calls[0]
+        system, user = kwargs["messages"]
+        self.assertTrue(system["content"].startswith(roast.PROFILE_EXTRACTION_PROMPT))
+        self.assertIn(roast.PROFILE_FOCUS_INSTRUCTION, system["content"])
+        self.assertIn("work and health", user["content"])
+        self.assertIn('"focus"', user["content"])
+
+    async def test_extract_profile_points_omits_focus_when_absent(self):
+        fake = FakeOpenAI(_chat_response(json.dumps({"points": ["fact"]})))
+
+        with patch.object(roast.settings, "openai_api_key", "key"), \
+                patch.object(roast, "client", fake):
+            await roast.extract_profile_points("entry", ["known"])
+
+        kwargs = fake.chat.completions.calls[0]
+        self.assertEqual(kwargs["messages"][0]["content"], roast.PROFILE_EXTRACTION_PROMPT)
+        self.assertNotIn('"focus"', kwargs["messages"][1]["content"])
+
     async def test_extract_profile_points_raises_when_empty(self):
         fake = FakeOpenAI(_chat_response(""))
 
