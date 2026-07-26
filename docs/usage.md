@@ -1,0 +1,71 @@
+# Usage
+
+## How it works
+
+1. You send a voice (or text) message to the bot.
+2. Voice is transcribed with OpenAI Whisper.
+3. The formatter generates a title, tags, and a lightly cleaned text candidate.
+4. The bot shows a preview — generated title/tags, but the original transcription as the text.
+5. Optionally **Format** to swap in the cleaned text (split into paragraphs); **↺ Original** restores it.
+6. Optionally mark the entry as a highlight ⭐.
+7. Press **Save** — the entry becomes its own row in your Notion database.
+
+## Editing before saving
+
+The processing reply turns into a single preview message you edit in place:
+
+```
+Generated title
+
+Original transcribed text
+
+Date: Today (YYYY-MM-DD)
+
+Daily sport health
+
+[ ✎ Title ]  [ ✎ Text ]  [ ✎ Tags ]
+[              ✦ Format              ]
+[        Date: Today (YYYY-MM-DD)        ]
+[      Mark as Highlight ⭐       ]
+[            🔥 Roast             ]
+[            ✓ Save              ]
+[            Cancel              ]
+```
+
+- **✎ Title / Text / Tags** — prompt you for a new value; the preview updates in place.
+- **✦ Format** — replaces only the draft text with the formatter's cleaned version (semantic paragraphs, saved as separate Notion blocks). It fixes recognition/grammar slips without changing your wording or meaning. Becomes **↺ Original** so you can revert.
+- **Date** — opens a 7-day picker. **Back to preview** keeps the date; **Cancel draft** discards.
+- **Cancel** — discards the draft without saving.
+
+Nothing is written to Notion until you press **Save**. If saving fails, the preview stays with the Save button so you can retry. If the bot recognizes an already-saved voice message, it warns you first and offers **Add anyway**.
+
+## Highlights
+
+**Mark as Highlight ⭐** flags the entry as a key moment of the week (toggle to unmark). Saved highlights get a `⭐` prefix on the Notion heading and are surfaced first in the weekly report.
+
+## 🔥 Roast mode (разъёб)
+
+**🔥 Roast** sends the current draft to a high-reasoning model that plays a blunt-but-caring street-bro: honest, on your side, teasing where it helps, never sugar-coating. The take is posted as a new reply — your draft is never modified.
+
+Reply to any roast message to keep the thread going; the bot sends the whole prior chain plus your reply back to the model. These conversations live in RAM only and are discarded on restart.
+
+The button is available whenever the active AI provider's API key is set (see [Configuration](configuration.md)). The persona is built in but can be replaced with `ROAST_SYSTEM_PROMPT`; set `ROAST_LANGUAGE` to force a reply language regardless of the entry's language.
+
+### Author profile
+
+The bot distills a compact **author profile** — one-sentence facts about who you are — refreshed from **every diary message** (best-effort, in the background). It captures durable, decision-shaping context: long-term traits and biases, values, recurring patterns, key relationships and goals, and your current life phase (medium-term, not day-to-day). New knowledge is merged and semantically deduped; transient one-offs are dropped, and a message that adds nothing leaves the list unchanged. The points persist in local state and are fed back as background context on the next roast. Pick the model with `OPENAI_PROFILE_MODEL` (defaults to `OPENAI_SUMMARY_MODEL`).
+
+## Tags
+
+The `Daily` tag is always added. Additional tags can be:
+
+- **Extracted by the formatter** — mention them naturally: _"went for a run today. Tags: sport, health"_.
+- **Edited manually** — click **✎ Tags** and send them comma-separated: `sport, health, work`.
+
+## Summaries
+
+Every day at 21:00 (your timezone) the bot posts a summary of that day's entries, or a friendly reminder if there were none. Daily and weekly summaries include a small stats block (entry count, saved audio minutes, and the busiest day for weekly reports). Use `/weekly` to generate the weekly highlight report on demand.
+
+`/stat` shows total saved audio time, minutes for each of the last 7 days, and monthly totals for the last 6 months — computed from saved Notion rows with `Audio Duration` filled in.
+
+Date-picker defaults and summaries respect `DIARY_DAY_START_HOUR`: with `DIARY_DAY_START_HOUR=4`, entries before 04:00 belong to the previous diary date.

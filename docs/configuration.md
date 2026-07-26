@@ -1,0 +1,79 @@
+# Configuration
+
+Copy `.env.example` to `.env` and fill in the values:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Description |
+|----------|-------------|
+| `TELEGRAM_TOKEN` | Bot token from [@BotFather](https://t.me/BotFather) |
+| `OPENAI_API_KEY` | OpenAI API key. **Always required** — transcription (Whisper) is OpenAI-only, even with `AI_PROVIDER=anthropic` |
+| `NOTION_TOKEN` | Internal integration secret from notion.so/profile/integrations |
+| `NOTION_DATABASE_ID` | ID from the database URL: `notion.so/workspace/{ID}?v=...` |
+| `ALLOWED_USER_ID` | Your Telegram user ID — from [@userinfobot](https://t.me/userinfobot) |
+| `TIMEZONE` | Your timezone, e.g. `Asia/Bangkok`, `Europe/Moscow` |
+| `AI_PROVIDER` | Optional. Chat provider for formatting/summaries/roast: `openai` (default) or `anthropic` |
+| `ANTHROPIC_API_KEY` | Required only when `AI_PROVIDER=anthropic` |
+| `DIARY_DAY_START_HOUR` | Optional. Hour the diary day starts in `TIMEZONE`, `0`-`23`; defaults to `0` |
+| `SILENT_NOTIFICATIONS` | Optional. Send messages without push notifications; defaults to `true` |
+| `ROAST_LANGUAGE` | Optional. Language the roast replies in; defaults to `Russian` |
+| `ROAST_SYSTEM_PROMPT` | Optional. Overrides the built-in roast persona |
+
+### Model overrides
+
+All optional — sensible defaults are used when unset.
+
+| Variable | Applies to | Default |
+|----------|-----------|---------|
+| `OPENAI_TRANSCRIPTION_MODEL` | Speech-to-text (always OpenAI) | `whisper-1` |
+| `OPENAI_FORMATTER_MODEL` | Formatting (OpenAI mode) | `gpt-5.6-luna` |
+| `OPENAI_SUMMARY_MODEL` | Summaries (OpenAI mode) | `OPENAI_FORMATTER_MODEL` |
+| `OPENAI_PROFILE_MODEL` | Author profile (OpenAI mode) | `OPENAI_SUMMARY_MODEL` |
+| `OPENAI_ROAST_MODEL` | Roast (OpenAI mode) | `gpt-5.6` |
+| `ANTHROPIC_FORMATTER_MODEL` | Formatting (Anthropic mode) | `claude-opus-4-8` |
+| `ANTHROPIC_SUMMARY_MODEL` | Summaries (Anthropic mode) | `ANTHROPIC_FORMATTER_MODEL` |
+| `ANTHROPIC_PROFILE_MODEL` | Author profile (Anthropic mode) | `ANTHROPIC_SUMMARY_MODEL` |
+| `ANTHROPIC_ROAST_MODEL` | Roast (Anthropic mode) | `claude-opus-4-8` |
+
+## Switching AI provider
+
+Formatting, summaries, and the roast run through whichever provider `AI_PROVIDER` selects. To use Anthropic:
+
+```bash
+AI_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+```
+
+No code changes needed — restart the bot. Transcription always uses OpenAI Whisper, so `OPENAI_API_KEY` stays required in both modes.
+
+## Notion setup
+
+The bot works with the [Notion Journal](https://www.notion.com/help/guides/journal) database. It auto-creates any missing `Created`, `Tags`, `Day`, and metadata properties, so you mostly just need to connect the integration:
+
+1. Open your database in Notion.
+2. Click `...` → `Connections` → select your integration.
+
+### Database properties
+
+| Property | Type | Notes |
+|----------|------|-------|
+| `Name` | Title | Entry title |
+| `Created` | Date | Set per entry; used for daily/weekly summaries |
+| `Tags` | Multi-select | Auto-populated; `Daily` always added |
+| `Day` | Select | Auto-populated `YYYY-MM-DD`; group your table by this |
+| `Source` | Select | `voice` or `text` |
+| `Telegram Chat ID` | Number | Source chat, for tracing and duplicate checks |
+| `Telegram Message ID` | Number | Source message, for tracing and duplicate checks |
+| `Source Message URL` | URL | Telegram link to the original message |
+| `Voice File Unique ID` | Text | Stable Telegram voice file identifier |
+| `Audio Duration` | Number | Voice duration in seconds |
+| `Audio File Size` | Number | Voice file size in bytes |
+| `Source Text SHA256` | Text | Exact hash for manually sent text notes |
+
+**Duplicates:** before creating a row, the bot checks this metadata — voice notes by Telegram file id + duration/size, text notes by exact source-text hash — and offers **Add anyway** when it finds one.
+
+**Reliability:** saves are retried on transient Notion/network errors and verified by re-reading the created page before the draft is marked saved.
+
+**Source links:** private bot chats have no public message permalink, so `Source Message URL` uses a `https://t.me/<bot>?start=...` link — opening it makes the bot reply to the original message.
