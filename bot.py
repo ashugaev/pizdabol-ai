@@ -24,7 +24,7 @@ from telegram.ext import (
 )
 
 from config import settings
-from services import roast
+from services import profile_rebuild, roast
 from services.diary_dates import diary_today
 from services.formatter import format_entry
 from services.notion import save_entry
@@ -43,12 +43,19 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 DRAFTS_KEY = "drafts"
 EDIT_PROMPTS_KEY = "edit_prompts"
+MEMORY_PROMPTS_KEY = "memory_prompts"
+MEMORY_REQUESTS_KEY = "memory_requests"
 MAX_CONCURRENT_UPDATES = 1024
 STARTUP_REPLAY_LIMIT = 10
 DATE_PICKER_DAYS = 7
 TELEGRAM_MESSAGE_LIMIT = 4096
 SOURCE_DEEPLINK_PREFIX = "src_"
 ROAST_CHAINS_LIMIT = 50
+# Focus replies that mean "no extra focus, just rebuild".
+MEMORY_SKIP_FOCUS_TOKENS = {"-", "--", "—", "skip", "no", "none"}
+# Refresh the progress message every N notes: a full pass can be hundreds of
+# notes, and one edit per note would hit Telegram's rate limit.
+MEMORY_PROGRESS_EVERY = 5
 
 # In-memory (RAM-only) roast conversations, keyed by "chat_id:message_id" of each
 # bot roast message. Replying to one of those messages continues that conversation.
@@ -103,7 +110,10 @@ HELP_TEXT = """*How to use Noter*
 Every day at 21:00 I send a summary of all entries recorded that day. If there are none, I'll send a friendly nudge instead.
 
 *Stats*
-*/stat* — show total saved audio minutes, daily stats for the last 7 days, and monthly stats for the last 6 months."""
+*/stat* — show total saved audio minutes, daily stats for the last 7 days, and monthly stats for the last 6 months.
+
+*Long-term memory*
+*/memory* — rebuild the author profile from every saved note. I ask for focus points first (reply with text or voice, or send `-` to skip), show a confirmation, and then walk the notes oldest-first with a progress bar. Existing facts are corrected rather than thrown away."""
 
 
 def _tags_html(tags: list[str]) -> str:
@@ -311,6 +321,14 @@ def _drafts(context: ContextTypes.DEFAULT_TYPE) -> dict:
 
 def _edit_prompts(context: ContextTypes.DEFAULT_TYPE) -> dict:
     return context.user_data.setdefault(EDIT_PROMPTS_KEY, {})
+
+
+def _memory_prompts(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.user_data.setdefault(MEMORY_PROMPTS_KEY, {})
+
+
+def _memory_requests(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.user_data.setdefault(MEMORY_REQUESTS_KEY, {})
 
 
 def _prompt_key(chat_id: int, message_id: int) -> str:
@@ -835,6 +853,13 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     roast_chain = _replied_roast_chain(message)
     if roast_chain is not None:
         await _handle_roast_voice_followup(update, context, roast_chain)
+        return
+
+    reply_to = getattr(message, "reply_to_message", None)
+    if reply_to and _memory_prompts(context).pop(
+        _prompt_key(_message_chat_id(message), reply_to.message_id), None
+    ):
+        await _receive_memory_focus_voice(update, context)
         return
 
     voice = message.voice
@@ -1388,6 +1413,9 @@ async def receive_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     prompt_id = reply_to.message_id
     prompt = _edit_prompts(context).pop(_prompt_key(chat_id, prompt_id), None)
     if not prompt:
+        if _memory_prompts(context).pop(_prompt_key(chat_id, prompt_id), None):
+            await _receive_memory_focus(update, context, user_msg.text or "")
+            return
         roast_chain = _roast_chains.get(_roast_chain_key(chat_id, prompt_id))
         if roast_chain is not None:
             await _handle_roast_followup(update, context, roast_chain)
@@ -1417,6 +1445,221 @@ async def receive_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await context.bot.delete_message(chat_id, prompt_id)
     with suppress(Exception):
         await context.bot.delete_message(chat_id, user_msg.message_id)
+
+
+# --- Retrospective long-term memory rebuild -------------------------------
+# Two steps: /memory asks for focus points, the reply shows a confirmation card,
+# and Confirm starts a sequential walk over every saved note. Every message here
+# is plain text on purpose — the focus text is arbitrary user input and must not
+# be parsed as Markdown or HTML.
+
+
+def _memory_stored_line(stored: int) -> str:
+    if stored:
+        return f"Stored now: {stored} fact(s) — kept as the starting point and corrected along the way."
+    return "Nothing is stored yet — the profile will be built from scratch."
+
+
+def _memory_intro_text(stored: int) -> str:
+    return "\n".join([
+        "🧠 Long-term memory rebuild",
+        "",
+        "I'll walk through every saved note in Notion, oldest first, and rebuild the "
+        "author profile note by note — one AI request per note, same as when you send a new one.",
+        "",
+        _memory_stored_line(stored),
+        "",
+        "Reply with the focus points for this pass: what matters most, what to keep, what to drop.",
+        "Send - to rebuild without extra focus.",
+    ])
+
+
+def _memory_focus_line(focus: str) -> str:
+    return f"Focus: {focus}" if focus else "Focus: none"
+
+
+def _memory_confirm_text(focus: str, stored: int) -> str:
+    return "\n".join([
+        "🧠 Ready to rebuild long-term memory",
+        "",
+        _memory_focus_line(focus),
+        _memory_stored_line(stored),
+        "",
+        "Every note costs one AI request, so a full pass takes a while. Progress is saved as it goes.",
+    ])
+
+
+def _memory_progress_text(progress, focus: str) -> str:
+    return "\n".join([
+        "🧠 Rebuilding long-term memory...",
+        "",
+        profile_rebuild.render_progress_bar(progress.handled, progress.total),
+        f"Facts: {len(progress.points)}",
+        _memory_focus_line(focus),
+    ])
+
+
+def _memory_result_text(progress, before: int, focus: str) -> str:
+    if not progress.total:
+        return "🧠 No saved notes found in Notion — nothing to rebuild from."
+
+    lines = [
+        "⚠️ Long-term memory rebuild stopped early" if progress.aborted_reason
+        else "✅ Long-term memory rebuilt",
+        "",
+        profile_rebuild.render_progress_bar(progress.handled, progress.total),
+        f"Notes read: {progress.processed}",
+    ]
+    if progress.skipped:
+        lines.append(f"Empty notes skipped: {progress.skipped}")
+    if progress.failed:
+        lines.append(f"Notes failed: {progress.failed}")
+    lines.append(f"Facts: {before} → {len(progress.points)}")
+    lines.append(_memory_focus_line(focus))
+    if progress.aborted_reason:
+        lines += ["", f"Reason: {progress.aborted_reason}", "Everything processed so far is saved."]
+    return "\n".join(lines)
+
+
+def _memory_keyboard(request_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✓ Confirm", callback_data=f"memory_confirm:{request_id}"),
+        InlineKeyboardButton("✗ Cancel", callback_data=f"memory_cancel:{request_id}"),
+    ]])
+
+
+async def handle_memory(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Step 1: ask for the focus points that should steer this rebuild."""
+    message = update.effective_message
+    if not roast.is_configured():
+        await message.reply_text("AI provider API key is not configured.")
+        return
+    if profile_rebuild.is_running():
+        await message.reply_text("A memory rebuild is already running. Wait for it to finish.")
+        return
+
+    prompt = await message.reply_text(
+        _memory_intro_text(len(state_store.get_profile_points())),
+        reply_markup=ForceReply(selective=True),
+    )
+    _memory_prompts(context)[_prompt_key(_message_chat_id(message), prompt.message_id)] = True
+
+
+async def _receive_memory_focus(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    focus_text: str,
+) -> None:
+    """Step 2: park the focus under a request id and ask for confirmation."""
+    focus = " ".join(focus_text.split())
+    if focus.lower() in MEMORY_SKIP_FOCUS_TOKENS:
+        focus = ""
+
+    request_id = _new_entry_id()
+    _memory_requests(context)[request_id] = {"focus": focus}
+    await update.effective_message.reply_text(
+        _memory_confirm_text(focus, len(state_store.get_profile_points())),
+        reply_markup=_memory_keyboard(request_id),
+    )
+
+
+async def _receive_memory_focus_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """A voice reply to the focus prompt is transcribed into focus, never saved as a note."""
+    message = update.effective_message
+    status = await _reply_to_source(message, "Transcribing...")
+    try:
+        focus_text = await _transcribe_voice_file(context, message.voice.file_id)
+    except Exception as e:
+        logger.exception("Error transcribing memory focus voice message")
+        await _edit_reply_message(context, status, f"Error: {e}\n\nRun /memory again to retry.")
+        return
+
+    if not focus_text:
+        await _edit_reply_message(
+            context,
+            status,
+            f"{settings.openai_transcription_model} did not recognize any speech. "
+            "Run /memory again to retry.",
+        )
+        return
+
+    await _edit_reply_message(context, status, f"Focus: {focus_text}")
+    await _receive_memory_focus(update, context, focus_text)
+
+
+async def memory_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Step 3: Confirm starts the sequential pass, Cancel drops the request."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data or ""
+    if ":" not in data:
+        return
+    action, request_id = data.split(":", 1)
+
+    request = _memory_requests(context).pop(request_id, None)
+    if request is None:
+        await query.edit_message_text("This memory rebuild request is no longer available.")
+        return
+
+    if action == "memory_cancel":
+        await query.edit_message_text("Memory rebuild cancelled.")
+        return
+
+    if profile_rebuild.is_running():
+        await query.edit_message_text("A memory rebuild is already running. Wait for it to finish.")
+        return
+
+    focus = request.get("focus") or ""
+    await query.edit_message_text("🧠 Starting the long-term memory rebuild...")
+    context.application.create_task(
+        _run_memory_rebuild(context, query.message, focus),
+        update=update,
+    )
+
+
+async def _run_memory_rebuild(
+    context: ContextTypes.DEFAULT_TYPE,
+    status_message,
+    focus: str,
+) -> None:
+    """Drive the sequential rebuild: persist points after every note so an abort or
+    a restart never loses the pass, and refresh the progress message on a throttle."""
+    before = state_store.get_profile_points()
+    last_rendered = None
+
+    async def on_progress(progress) -> None:
+        nonlocal last_rendered
+        state_store.set_profile_points(progress.points)
+        if progress.handled % MEMORY_PROGRESS_EVERY:
+            return
+        text = _memory_progress_text(progress, focus)
+        if text == last_rendered:
+            return
+        last_rendered = text
+        with suppress(Exception):
+            await _edit_reply_message(context, status_message, text)
+
+    try:
+        result = await profile_rebuild.rebuild_profile(focus or None, before, on_progress)
+    except profile_rebuild.RebuildAlreadyRunning:
+        with suppress(Exception):
+            await _edit_reply_message(
+                context, status_message, "A memory rebuild is already running."
+            )
+        return
+    except Exception as e:
+        logger.exception("Memory rebuild failed")
+        with suppress(Exception):
+            await _edit_reply_message(context, status_message, f"Memory rebuild failed: {e}")
+        return
+
+    with suppress(Exception):
+        await _edit_reply_message(
+            context,
+            status_message,
+            _memory_result_text(result, len(before), focus),
+        )
 
 
 async def handle_weekly(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1503,6 +1746,7 @@ def main() -> None:
         CommandHandler("help", handle_help, filters=user_filter),
         CommandHandler("weekly", handle_weekly, filters=user_filter),
         CommandHandler("stat", handle_stat, filters=user_filter),
+        CommandHandler("memory", handle_memory, filters=user_filter),
     ]
 
     for handler in command_handlers:
@@ -1520,6 +1764,12 @@ def main() -> None:
         CallbackQueryHandler(
             duplicate_callback,
             pattern="^(add_duplicate|cancel_duplicate):",
+        )
+    )
+    app.add_handler(
+        CallbackQueryHandler(
+            memory_callback,
+            pattern="^memory_(confirm|cancel):",
         )
     )
     app.add_handler(

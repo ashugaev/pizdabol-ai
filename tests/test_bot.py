@@ -1007,7 +1007,7 @@ class MainRegistrationTests(unittest.TestCase):
             for handler in command_handlers
         }
 
-        self.assertEqual(set(command_filters), {"start", "help", "weekly", "stat"})
+        self.assertEqual(set(command_filters), {"start", "help", "weekly", "stat", "memory"})
         for command, command_filter in command_filters.items():
             with self.subTest(command=command):
                 self.assertEqual(command_filter.user_ids, frozenset({bot.settings.allowed_user_id}))
@@ -1544,3 +1544,343 @@ class TranscribeVoiceFileTests(unittest.IsolatedAsyncioTestCase):
                 await bot._transcribe_voice_file(context, "file-9")
 
         self.assertFalse(os.path.exists(downloaded[0]))
+
+
+def _memory_progress(handled, total, points, skipped=0, failed=0, aborted_reason=None):
+    return bot.profile_rebuild.RebuildProgress(
+        total=total,
+        processed=handled - skipped - failed,
+        skipped=skipped,
+        failed=failed,
+        points=list(points),
+        aborted_reason=aborted_reason,
+    )
+
+
+class MemoryCommandTests(unittest.IsolatedAsyncioTestCase):
+    def _update(self, fake_bot, text="/memory"):
+        message = SimpleNamespace(
+            text=text,
+            chat_id=123,
+            message_id=50,
+            reply_text=AsyncMock(return_value=SimpleNamespace(chat_id=123, message_id=51)),
+        )
+        return SimpleNamespace(
+            effective_message=message,
+            effective_chat=SimpleNamespace(id=123),
+        ), message
+
+    async def test_command_asks_for_focus_and_registers_the_prompt(self):
+        context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        update, message = self._update(context.bot)
+
+        with patch.object(bot.roast, "is_configured", return_value=True), \
+                patch.object(bot.state_store, "get_profile_points", return_value=["known fact"]), \
+                patch.object(bot.profile_rebuild, "is_running", return_value=False):
+            await bot.handle_memory(update, context)
+
+        kwargs = message.reply_text.await_args.kwargs
+        text = message.reply_text.await_args.args[0]
+        self.assertIn("Long-term memory rebuild", text)
+        self.assertIn("1 fact(s)", text)
+        self.assertIn("Send - to rebuild without extra focus", text)
+        self.assertIsInstance(kwargs["reply_markup"], bot.ForceReply)
+        # The prompt is registered so the reply is treated as focus, not as a note.
+        self.assertEqual(bot._memory_prompts(context), {"123:51": True})
+
+    async def test_command_says_profile_is_empty_when_nothing_is_stored(self):
+        context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        update, message = self._update(context.bot)
+
+        with patch.object(bot.roast, "is_configured", return_value=True), \
+                patch.object(bot.state_store, "get_profile_points", return_value=[]), \
+                patch.object(bot.profile_rebuild, "is_running", return_value=False):
+            await bot.handle_memory(update, context)
+
+        self.assertIn("built from scratch", message.reply_text.await_args.args[0])
+
+    async def test_command_refuses_without_a_configured_provider(self):
+        context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        update, message = self._update(context.bot)
+
+        with patch.object(bot.roast, "is_configured", return_value=False):
+            await bot.handle_memory(update, context)
+
+        message.reply_text.assert_awaited_once_with("AI provider API key is not configured.")
+        self.assertEqual(bot._memory_prompts(context), {})
+
+    async def test_command_refuses_while_a_rebuild_is_running(self):
+        context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        update, message = self._update(context.bot)
+
+        with patch.object(bot.roast, "is_configured", return_value=True), \
+                patch.object(bot.profile_rebuild, "is_running", return_value=True):
+            await bot.handle_memory(update, context)
+
+        self.assertIn("already running", message.reply_text.await_args.args[0])
+        self.assertEqual(bot._memory_prompts(context), {})
+
+
+class MemoryFocusReplyTests(unittest.IsolatedAsyncioTestCase):
+    def _reply_update(self, text):
+        user_msg = SimpleNamespace(
+            text=text,
+            reply_to_message=SimpleNamespace(message_id=51),
+            chat_id=123,
+            message_id=60,
+            reply_text=AsyncMock(),
+        )
+        return SimpleNamespace(
+            effective_message=user_msg,
+            effective_chat=SimpleNamespace(id=123),
+        ), user_msg
+
+    def _context(self):
+        return SimpleNamespace(
+            bot=FakeEditBot(),
+            user_data={bot.MEMORY_PROMPTS_KEY: {"123:51": True}},
+        )
+
+    async def test_focus_reply_shows_confirmation_and_never_becomes_a_note(self):
+        context = self._context()
+        update, user_msg = self._reply_update("  focus on   work and health  ")
+
+        with patch.object(bot.state_store, "get_profile_points", return_value=["a", "b"]), \
+                patch.object(bot, "handle_text", new=AsyncMock()) as fake_handle_text:
+            await bot.receive_edit_reply(update, context)
+
+        fake_handle_text.assert_not_awaited()
+        text = user_msg.reply_text.await_args.args[0]
+        self.assertIn("Ready to rebuild", text)
+        self.assertIn("Focus: focus on work and health", text)
+        self.assertIn("2 fact(s)", text)
+
+        keyboard = user_msg.reply_text.await_args.kwargs["reply_markup"]
+        confirm, cancel = keyboard.inline_keyboard[0]
+        request_id = confirm.callback_data.removeprefix("memory_confirm:")
+        self.assertEqual(cancel.callback_data, f"memory_cancel:{request_id}")
+        self.assertEqual(
+            bot._memory_requests(context)[request_id],
+            {"focus": "focus on work and health"},
+        )
+        # The prompt is consumed, so a later unrelated reply is not read as focus.
+        self.assertEqual(bot._memory_prompts(context), {})
+
+    async def test_skip_tokens_mean_no_focus(self):
+        for token in ["-", "  SKIP ", "none", "—"]:
+            with self.subTest(token=token):
+                context = self._context()
+                update, user_msg = self._reply_update(token)
+
+                with patch.object(bot.state_store, "get_profile_points", return_value=[]):
+                    await bot.receive_edit_reply(update, context)
+
+                self.assertIn("Focus: none", user_msg.reply_text.await_args.args[0])
+                request = next(iter(bot._memory_requests(context).values()))
+                self.assertEqual(request, {"focus": ""})
+
+    async def test_unrelated_reply_still_falls_through_to_handle_text(self):
+        context = self._context()
+        update, _ = self._reply_update("just a normal note")
+        update.effective_message.reply_to_message = SimpleNamespace(message_id=999)
+
+        with patch.object(bot, "handle_text", new=AsyncMock()) as fake_handle_text:
+            await bot.receive_edit_reply(update, context)
+
+        fake_handle_text.assert_awaited_once()
+        self.assertEqual(bot._memory_prompts(context), {"123:51": True})
+
+    async def test_voice_reply_is_transcribed_into_focus_and_never_saved(self):
+        fake_bot = FakeRoastBot()
+        context = SimpleNamespace(
+            bot=fake_bot,
+            user_data={bot.MEMORY_PROMPTS_KEY: {"123:51": True}},
+        )
+        user_msg = SimpleNamespace(
+            voice=SimpleNamespace(file_id="voice-file-1"),
+            reply_to_message=SimpleNamespace(message_id=51),
+            chat_id=123,
+            message_id=60,
+            reply_text=AsyncMock(),
+            get_bot=lambda: fake_bot,
+        )
+        update = SimpleNamespace(
+            effective_message=user_msg,
+            effective_chat=SimpleNamespace(id=123),
+        )
+
+        with patch.object(bot, "_transcribe_voice_file", new=AsyncMock(return_value="keep the work stuff")), \
+                patch.object(bot.state_store, "get_profile_points", return_value=[]), \
+                patch.object(bot.state_store, "record_voice") as record_voice:
+            await bot.handle_voice(update, context)
+
+        record_voice.assert_not_called()
+        self.assertIn("keep the work stuff", fake_bot.edits[-1]["text"])
+        request = next(iter(bot._memory_requests(context).values()))
+        self.assertEqual(request, {"focus": "keep the work stuff"})
+
+    async def test_voice_reply_without_speech_reports_and_starts_no_request(self):
+        fake_bot = FakeRoastBot()
+        context = SimpleNamespace(
+            bot=fake_bot,
+            user_data={bot.MEMORY_PROMPTS_KEY: {"123:51": True}},
+        )
+        user_msg = SimpleNamespace(
+            voice=SimpleNamespace(file_id="voice-file-1"),
+            reply_to_message=SimpleNamespace(message_id=51),
+            chat_id=123,
+            message_id=60,
+            get_bot=lambda: fake_bot,
+        )
+        update = SimpleNamespace(
+            effective_message=user_msg,
+            effective_chat=SimpleNamespace(id=123),
+        )
+
+        with patch.object(bot, "_transcribe_voice_file", new=AsyncMock(return_value="")), \
+                patch.object(bot.state_store, "record_voice") as record_voice:
+            await bot.handle_voice(update, context)
+
+        record_voice.assert_not_called()
+        self.assertIn("did not recognize any speech", fake_bot.edits[-1]["text"])
+        self.assertEqual(bot._memory_requests(context), {})
+
+
+class MemoryCallbackTests(unittest.IsolatedAsyncioTestCase):
+    def _context(self, requests):
+        return SimpleNamespace(
+            bot=FakeEditBot(),
+            application=FakeApplication(close_coroutines=True),
+            user_data={bot.MEMORY_REQUESTS_KEY: requests},
+        )
+
+    async def test_confirm_starts_the_rebuild_task(self):
+        context = self._context({"req-1": {"focus": "work"}})
+        query = FakeQuery(data="memory_confirm:req-1")
+        update = SimpleNamespace(callback_query=query)
+
+        with patch.object(bot.profile_rebuild, "is_running", return_value=False):
+            await bot.memory_callback(update, context)
+
+        self.assertIn("Starting the long-term memory rebuild", query.edits[0]["text"])
+        self.assertEqual(len(context.application.created_tasks), 1)
+        # The request is consumed, so the same button cannot start a second pass.
+        self.assertEqual(bot._memory_requests(context), {})
+
+    async def test_cancel_drops_the_request_without_running(self):
+        context = self._context({"req-1": {"focus": "work"}})
+        query = FakeQuery(data="memory_cancel:req-1")
+        update = SimpleNamespace(callback_query=query)
+
+        await bot.memory_callback(update, context)
+
+        self.assertEqual(query.edits[0]["text"], "Memory rebuild cancelled.")
+        self.assertEqual(context.application.created_tasks, [])
+        self.assertEqual(bot._memory_requests(context), {})
+
+    async def test_stale_request_is_reported(self):
+        context = self._context({})
+        query = FakeQuery(data="memory_confirm:gone")
+        update = SimpleNamespace(callback_query=query)
+
+        await bot.memory_callback(update, context)
+
+        self.assertIn("no longer available", query.edits[0]["text"])
+        self.assertEqual(context.application.created_tasks, [])
+
+    async def test_confirm_refuses_while_another_pass_is_running(self):
+        context = self._context({"req-1": {"focus": ""}})
+        query = FakeQuery(data="memory_confirm:req-1")
+        update = SimpleNamespace(callback_query=query)
+
+        with patch.object(bot.profile_rebuild, "is_running", return_value=True):
+            await bot.memory_callback(update, context)
+
+        self.assertIn("already running", query.edits[0]["text"])
+        self.assertEqual(context.application.created_tasks, [])
+
+
+class MemoryRebuildRunnerTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.context = SimpleNamespace(bot=FakeEditBot(), user_data={})
+        self.status_message = SimpleNamespace(chat_id=123, message_id=20)
+
+    async def _run(self, fake_rebuild, before=None):
+        with patch.object(bot.state_store, "get_profile_points", return_value=list(before or [])), \
+                patch.object(bot.state_store, "set_profile_points") as saved, \
+                patch.object(bot.profile_rebuild, "rebuild_profile", new=fake_rebuild):
+            await bot._run_memory_rebuild(self.context, self.status_message, "work")
+        return saved
+
+    async def test_progress_is_persisted_per_note_and_edits_are_throttled(self):
+        async def fake_rebuild(focus, existing, on_progress):
+            self.assertEqual(focus, "work")
+            self.assertEqual(existing, ["old"])
+            for handled in range(7):
+                await on_progress(_memory_progress(handled, 6, ["old"] + ["f"] * handled))
+            return _memory_progress(6, 6, ["old"] + ["f"] * 6)
+
+        saved = await self._run(fake_rebuild, before=["old"])
+
+        # Every note persists, so an abort or a restart never loses the pass.
+        self.assertEqual(saved.call_count, 7)
+        self.assertEqual(saved.call_args_list[3].args[0], ["old", "f", "f", "f"])
+
+        # Only every 5th note refreshes the message, plus the final result.
+        progress_edits = [edit["text"] for edit in self.context.bot.edits[:-1]]
+        self.assertEqual(len(progress_edits), 2)
+        self.assertIn("0/6 notes", progress_edits[0])
+        self.assertIn("5/6 notes", progress_edits[1])
+        for text in progress_edits:
+            self.assertIn("Rebuilding long-term memory", text)
+            self.assertIn("Focus: work", text)
+
+    async def test_final_message_reports_the_delta(self):
+        async def fake_rebuild(focus, existing, on_progress):
+            return _memory_progress(5, 5, ["a", "b", "c"], skipped=1, failed=1)
+
+        await self._run(fake_rebuild, before=["a"])
+
+        text = self.context.bot.edits[-1]["text"]
+        self.assertIn("✅ Long-term memory rebuilt", text)
+        self.assertIn("Notes read: 3", text)
+        self.assertIn("Empty notes skipped: 1", text)
+        self.assertIn("Notes failed: 1", text)
+        self.assertIn("Facts: 1 → 3", text)
+        self.assertIn("100%", text)
+
+    async def test_aborted_pass_is_reported_as_stopped_early(self):
+        async def fake_rebuild(focus, existing, on_progress):
+            return _memory_progress(3, 40, ["a"], failed=3, aborted_reason="3 notes in a row failed at note 3/40")
+
+        await self._run(fake_rebuild)
+
+        text = self.context.bot.edits[-1]["text"]
+        self.assertIn("stopped early", text)
+        self.assertIn("3 notes in a row failed", text)
+        self.assertIn("Everything processed so far is saved", text)
+
+    async def test_empty_database_is_reported_without_a_delta(self):
+        async def fake_rebuild(focus, existing, on_progress):
+            return _memory_progress(0, 0, [])
+
+        await self._run(fake_rebuild)
+
+        self.assertIn("No saved notes found", self.context.bot.edits[-1]["text"])
+
+    async def test_rebuild_failure_is_reported_and_swallowed(self):
+        fake_rebuild = AsyncMock(side_effect=RuntimeError("notion down"))
+
+        with patch.object(bot.logger, "exception"):
+            await self._run(fake_rebuild)
+
+        self.assertIn("Memory rebuild failed: notion down", self.context.bot.edits[-1]["text"])
+
+    async def test_concurrent_pass_is_reported_without_a_traceback(self):
+        fake_rebuild = AsyncMock(
+            side_effect=bot.profile_rebuild.RebuildAlreadyRunning("already running")
+        )
+
+        await self._run(fake_rebuild)
+
+        self.assertIn("already running", self.context.bot.edits[-1]["text"])

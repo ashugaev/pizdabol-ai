@@ -55,6 +55,25 @@ The button is available whenever the active AI provider's API key is set (see [C
 
 The bot distills a compact **author profile** — one-sentence facts about who you are — refreshed from **every diary message** (best-effort, in the background). It captures durable, decision-shaping context: long-term traits and biases, values, recurring patterns, key relationships and goals, and your current life phase (medium-term, not day-to-day). New knowledge is merged and semantically deduped; transient one-offs are dropped, and a message that adds nothing leaves the list unchanged. The points persist in local state and are fed back as background context on the next roast. Pick the model with `OPENAI_PROFILE_MODEL` (defaults to `OPENAI_SUMMARY_MODEL`).
 
+### Rebuilding the profile retrospectively — `/memory`
+
+`/memory` walks your whole diary history and rebuilds the profile from it, in two steps:
+
+1. **Focus** — the bot asks what should drive this pass (what matters most, what to keep, what to drop). Reply with text or a voice message; send `-` to rebuild without extra focus. The reply is only ever read as focus, never saved as a diary note.
+2. **Confirm** — the bot echoes the focus and the current fact count, then waits for **✓ Confirm** or **✗ Cancel**. Nothing runs until you confirm.
+
+On confirm the bot walks every Notion note **oldest-first, one at a time** — one AI request per note, each fed the profile accumulated so far, exactly like the per-message refresh. Existing facts seed the pass and get corrected as it goes; an empty profile is built from scratch. Focus steers what gets pulled out and how known facts are reframed, and is never stored as a fact itself.
+
+The status message shows a live progress bar (throttled to stay inside Telegram's edit rate limits) and the running fact count, and the final message reports the fact delta plus any skipped or failed notes.
+
+The pass is built to be dull and safe:
+
+- **Sequential** — never concurrent, with a short pause between notes so Notion and the AI provider aren't hammered.
+- **Single-flight** — a second `/memory` run is refused while one is in flight.
+- **Fault-isolated** — a note that can't be read or extracted is counted and skipped; accumulated facts are untouched.
+- **Circuit-broken** — the pass aborts once notes fail back-to-back instead of burning one doomed request per remaining note.
+- **Incrementally saved** — facts are persisted after every note, so an abort or a restart never loses the pass.
+
 ## Tags
 
 The `Daily` tag is always added. Additional tags can be:

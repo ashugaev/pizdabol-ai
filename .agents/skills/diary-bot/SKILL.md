@@ -18,6 +18,7 @@ Use this as project memory for implementation and validation.
 | OpenAI transcription (always OpenAI, no Anthropic equivalent) | `services/whisper.py`, `tests/test_openai_services.py` |
 | Daily and weekly summaries (provider-neutral) | `services/summary.py`, `tests/test_openai_services.py` |
 | Notion schema, retries, duplicate checks, writes | `services/notion.py`, `tests/test_notion.py` |
+| Retrospective profile rebuild (`/memory`) | `services/profile_rebuild.py`, `tests/test_profile_rebuild.py` |
 | Local message and draft state | `services/state_store.py`, `tests/test_state_store.py` |
 | Dev, test, deploy commands | `Makefile`, `README.md`, `.github/workflows/ci.yml` |
 
@@ -30,6 +31,7 @@ Use this as project memory for implementation and validation.
 - Duplicate voice notes use Telegram voice facts; duplicate text notes use exact source-text hash.
 - Notion save retries transient errors and verifies created page before marking saved.
 - Long transcriptions use metadata-only formatting and keep original text.
+- `/memory` rebuild is two-step (focus prompt, then confirm), sequential, single-flight, and persists points after every note.
 
 ## External boundaries
 
