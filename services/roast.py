@@ -12,8 +12,9 @@ MAX_CONVERSATION_MESSAGES = 40
 
 # Compact author profile the model maintains across roasts.
 PROFILE_MAX_COMPLETION_TOKENS = 1024
+# Soft guidance passed to the model only — never enforced mechanically.
 MAX_PROFILE_POINTS = 100
-MAX_PROFILE_POINT_LENGTH = 140
+MAX_PROFILE_POINT_LENGTH = 200
 
 PROFILE_EXTRACTION_PROMPT = f"""Ты ведёшь компактный профиль автора дневника, чтобы лучше понимать, кто он, и точнее его направлять.
 Ты обновляешь профиль после КАЖДОЙ записи в дневнике, поэтому будь особенно строг: лучше 0 новых фактов, чем дубли или мусор.
@@ -30,9 +31,9 @@ PROFILE_EXTRACTION_PROMPT = f"""Ты ведёшь компактный проф�
 ВЫБРАСЫВАЙ разовое и то, что верно лишь в один момент: что он поел, туалетные и телесные события, настроение одной минуты, простой пересказ прошедшего дня. Это НЕ устойчивые факты о человеке — не сохраняй их.
 
 Правила:
-- Каждый факт — одно короткое самодостаточное предложение, максимум {MAX_PROFILE_POINT_LENGTH} символов.
+- Каждый факт — одно самодостаточное предложение, ориентировочно до {MAX_PROFILE_POINT_LENGTH} символов; это ориентир, а не жёсткий обрез — не режь мысль ради лимита.
 - Различай долгосрочное (черты, байасы) и среднесрочное (текущая фаза): формулируй так, чтобы было понятно, что есть что.
-- Верни не больше {MAX_PROFILE_POINTS} самых важных фактов, лучше меньше.
+- Держи примерно до {MAX_PROFILE_POINTS} самых важных фактов, лучше меньше; если их становится больше — объединяй и убирай слабое, а не обрезай по счётчику.
 - Семантический дедуп: объединяй факты, которые значат одно и то же, никогда не выдавай почти-дубли и переформулировки уже известного.
 - Обновляй факт, если запись его уточняет или он устарел (особенно текущую фазу); убирай то, что перестало быть правдой.
 - Если новая запись не добавляет ничего реально нового и устойчивого — верни уже известные факты БЕЗ ИЗМЕНЕНИЙ, дословно.
@@ -102,6 +103,9 @@ async def roast(messages: list[dict], points: list[str] | None = None) -> str:
 
 
 def _normalize_points(points: list) -> list[str]:
+    """Light hygiene only: drop non-strings, empties, and exact duplicates.
+    Point length and list size are guided at the prompt level — never trimmed
+    or capped mechanically."""
     seen: set[str] = set()
     result: list[str] = []
     for point in points:
@@ -110,15 +114,11 @@ def _normalize_points(points: list) -> list[str]:
         text = " ".join(point.split())
         if not text:
             continue
-        if len(text) > MAX_PROFILE_POINT_LENGTH:
-            text = text[:MAX_PROFILE_POINT_LENGTH].rstrip()
         key = text.lower()
         if key in seen:
             continue
         seen.add(key)
         result.append(text)
-        if len(result) >= MAX_PROFILE_POINTS:
-            break
     return result
 
 

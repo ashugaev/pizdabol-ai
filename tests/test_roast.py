@@ -120,12 +120,13 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("- avoids conflict", system)
 
     async def test_extract_profile_points_parses_normalizes_and_dedupes(self):
+        long_point = "x" * (roast.MAX_PROFILE_POINT_LENGTH + 20)
         raw = json.dumps({"points": [
             "  likes   hiking  ",
             "likes hiking",
             "",
             42,
-            "x" * (roast.MAX_PROFILE_POINT_LENGTH + 20),
+            long_point,
         ]})
         fake = FakeOpenAI(_chat_response(raw))
 
@@ -135,22 +136,23 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(points[0], "likes hiking")
         self.assertEqual(len(points), 2)  # deduped and empties/non-strings dropped
-        self.assertTrue(all(len(p) <= roast.MAX_PROFILE_POINT_LENGTH for p in points))
+        self.assertIn(long_point, points)  # long points are never mechanically truncated
 
         kwargs = fake.chat.completions.calls[0]
         self.assertEqual(kwargs["model"], roast.settings.openai_profile_model)
         self.assertEqual(kwargs["response_format"], {"type": "json_object"})
         self.assertIn("known fact", kwargs["messages"][1]["content"])
 
-    async def test_extract_profile_points_caps_count(self):
-        raw = json.dumps({"points": [f"fact {i}" for i in range(roast.MAX_PROFILE_POINTS + 5)]})
+    async def test_extract_profile_points_does_not_cap_count(self):
+        count = roast.MAX_PROFILE_POINTS + 5
+        raw = json.dumps({"points": [f"fact {i}" for i in range(count)]})
         fake = FakeOpenAI(_chat_response(raw))
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
             points = await roast.extract_profile_points("entry", [])
 
-        self.assertEqual(len(points), roast.MAX_PROFILE_POINTS)
+        self.assertEqual(len(points), count)  # count is guided at the prompt level, never capped mechanically
 
     async def test_extract_profile_points_raises_when_empty(self):
         fake = FakeOpenAI(_chat_response(""))
