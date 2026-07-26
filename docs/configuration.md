@@ -32,10 +32,10 @@ All optional — sensible defaults are used when unset.
 | `OPENAI_SUMMARY_MODEL` | Summaries (OpenAI mode) | `OPENAI_FORMATTER_MODEL` |
 | `OPENAI_PROFILE_MODEL` | Author profile (OpenAI mode) | `OPENAI_SUMMARY_MODEL` |
 | `OPENAI_ROAST_MODEL` | Roast (OpenAI mode) | `gpt-5.6` |
-| `ANTHROPIC_FORMATTER_MODEL` | Formatting (Anthropic mode) | `claude-opus-4-8` |
+| `ANTHROPIC_FORMATTER_MODEL` | Formatting (Anthropic mode) | `claude-opus-5` |
 | `ANTHROPIC_SUMMARY_MODEL` | Summaries (Anthropic mode) | `ANTHROPIC_FORMATTER_MODEL` |
 | `ANTHROPIC_PROFILE_MODEL` | Author profile (Anthropic mode) | `ANTHROPIC_SUMMARY_MODEL` |
-| `ANTHROPIC_ROAST_MODEL` | Roast (Anthropic mode) | `claude-opus-4-8` |
+| `ANTHROPIC_ROAST_MODEL` | Roast (Anthropic mode) | `claude-opus-5` |
 
 ## Switching AI provider
 
