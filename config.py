@@ -77,10 +77,10 @@ class _Settings:
     openai_summary_model: str = _optional_env("OPENAI_SUMMARY_MODEL", openai_formatter_model)
     openai_profile_model: str = _optional_env("OPENAI_PROFILE_MODEL", openai_summary_model)
     openai_roast_model: str = _optional_env("OPENAI_ROAST_MODEL", "gpt-5.6")
-    anthropic_formatter_model: str = _optional_env("ANTHROPIC_FORMATTER_MODEL", "claude-opus-4-8")
+    anthropic_formatter_model: str = _optional_env("ANTHROPIC_FORMATTER_MODEL", "claude-opus-5")
     anthropic_summary_model: str = _optional_env("ANTHROPIC_SUMMARY_MODEL", anthropic_formatter_model)
     anthropic_profile_model: str = _optional_env("ANTHROPIC_PROFILE_MODEL", anthropic_summary_model)
-    anthropic_roast_model: str = _optional_env("ANTHROPIC_ROAST_MODEL", "claude-opus-4-8")
+    anthropic_roast_model: str = _optional_env("ANTHROPIC_ROAST_MODEL", "claude-opus-5")
     # Provider-neutral models the chat services actually use, resolved from the
     # active provider so switching AI_PROVIDER needs no code changes.
     formatter_model: str = anthropic_formatter_model if ai_provider == "anthropic" else openai_formatter_model
