@@ -621,6 +621,14 @@ def _roast_chain_key(chat_id: int, message_id: int) -> str:
     return f"{chat_id}:{message_id}"
 
 
+def _replied_roast_chain(message) -> list[dict] | None:
+    """Return the roast chain the message replies to, or None if it isn't a roast reply."""
+    reply_to = getattr(message, "reply_to_message", None)
+    if not reply_to:
+        return None
+    return _roast_chains.get(_roast_chain_key(message.chat_id, reply_to.message_id))
+
+
 def _store_roast_chain(chat_id: int, message_id: int, messages: list[dict]) -> None:
     while len(_roast_chains) >= ROAST_CHAINS_LIMIT:
         oldest = next(iter(_roast_chains))
@@ -703,16 +711,49 @@ async def _roast_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) -
     await _run_roast(query.message, chain, context, status_message=status, points=points)
 
 
-async def _handle_roast_followup(update: Update, context: ContextTypes.DEFAULT_TYPE, chain_key: str) -> None:
+async def _handle_roast_followup(update: Update, context: ContextTypes.DEFAULT_TYPE, chain: list[dict]) -> None:
     user_msg = update.effective_message
-    chain = _roast_chains.get(chain_key)
     reply_text = (user_msg.text or "").strip()
-    if chain is None or not reply_text:
+    if not reply_text:
         await handle_text(update, context)
         return
 
     new_chain = list(chain) + [{"role": "user", "content": reply_text}]
     status = await _reply_to_source(user_msg, "🔥 Thinking...")
+    points = state_store.get_profile_points()
+    await _run_roast(user_msg, new_chain, context, status_message=status, points=points)
+
+
+async def _handle_roast_voice_followup(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    chain: list[dict],
+) -> None:
+    """Continue a roast conversation from a voice reply: transcribe first, then roast."""
+    user_msg = update.effective_message
+    status = await _reply_to_source(user_msg, "Transcribing...")
+    try:
+        reply_text = await _transcribe_voice_file(context, user_msg.voice.file_id)
+    except Exception as e:
+        logger.exception("Error transcribing roast follow-up voice message")
+        await _edit_reply_message(context, status, f"Error: {e}")
+        return
+
+    if not reply_text:
+        await _edit_reply_message(
+            context,
+            status,
+            f"{settings.openai_transcription_model} did not recognize any speech in this message.",
+        )
+        return
+
+    logger.info(
+        "Roast follow-up transcription with %s: %s",
+        settings.openai_transcription_model,
+        reply_text,
+    )
+    new_chain = list(chain) + [{"role": "user", "content": reply_text}]
+    await _edit_reply_message(context, status, "🔥 Thinking...")
     points = state_store.get_profile_points()
     await _run_roast(user_msg, new_chain, context, status_message=status, points=points)
 
@@ -775,8 +816,27 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.effective_message.reply_text(HELP_TEXT, parse_mode="Markdown")
 
 
+async def _transcribe_voice_file(context: ContextTypes.DEFAULT_TYPE, file_id: str) -> str:
+    tmp_path = None
+    try:
+        voice_file = await context.bot.get_file(file_id)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = tmp.name
+        await voice_file.download_to_drive(tmp_path)
+        return (await transcribe(tmp_path)).strip()
+    finally:
+        if tmp_path:
+            with suppress(FileNotFoundError):
+                os.unlink(tmp_path)
+
+
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     message = update.effective_message
+    roast_chain = _replied_roast_chain(message)
+    if roast_chain is not None:
+        await _handle_roast_voice_followup(update, context, roast_chain)
+        return
+
     voice = message.voice
     file_unique_id = getattr(voice, "file_unique_id", None)
     duration = getattr(voice, "duration", None)
@@ -850,7 +910,6 @@ async def _process_voice_record(
     context: ContextTypes.DEFAULT_TYPE,
     status_message=None,
 ) -> None:
-    tmp_path = None
     status_msg = status_message
     try:
         if status_msg:
@@ -858,13 +917,8 @@ async def _process_voice_record(
         else:
             status_msg = await _reply_to_source(message_ref, "Listening...")
 
-        voice_file = await context.bot.get_file(record["file_id"])
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-            tmp_path = tmp.name
-        await voice_file.download_to_drive(tmp_path)
-
         await _edit_reply_message(context, status_msg, "Transcribing...")
-        transcription = (await transcribe(tmp_path)).strip()
+        transcription = await _transcribe_voice_file(context, record["file_id"])
         logger.info(
             "Transcription with %s: %s",
             settings.openai_transcription_model,
@@ -907,10 +961,6 @@ async def _process_voice_record(
                 f"Error: {e}",
                 reply_markup=_retry_processing_keyboard(record["key"]),
             )
-    finally:
-        if tmp_path:
-            with suppress(FileNotFoundError):
-                os.unlink(tmp_path)
 
 
 async def _process_text_record(
@@ -1338,8 +1388,9 @@ async def receive_edit_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     prompt_id = reply_to.message_id
     prompt = _edit_prompts(context).pop(_prompt_key(chat_id, prompt_id), None)
     if not prompt:
-        if _roast_chain_key(chat_id, prompt_id) in _roast_chains:
-            await _handle_roast_followup(update, context, _roast_chain_key(chat_id, prompt_id))
+        roast_chain = _roast_chains.get(_roast_chain_key(chat_id, prompt_id))
+        if roast_chain is not None:
+            await _handle_roast_followup(update, context, roast_chain)
             return
         await handle_text(update, context)
         return

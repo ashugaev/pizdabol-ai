@@ -1412,3 +1412,135 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
             await bot.receive_edit_reply(update, context)
 
         fake_handle_text.assert_awaited_once()
+
+    @staticmethod
+    def _voice_reply_update(fake_bot, replied_to=50):
+        user_msg = SimpleNamespace(
+            voice=SimpleNamespace(file_id="voice-file-1"),
+            reply_to_message=SimpleNamespace(message_id=replied_to),
+            chat_id=123,
+            message_id=60,
+            get_bot=lambda: fake_bot,
+            reply_text=AsyncMock(),
+        )
+        return SimpleNamespace(
+            effective_message=user_msg,
+            effective_chat=SimpleNamespace(id=123),
+        )
+
+    async def test_voice_reply_to_roast_message_continues_conversation(self):
+        fake_bot = FakeRoastBot()
+        bot._roast_chains["123:50"] = [
+            {"role": "user", "content": "original entry"},
+            {"role": "assistant", "content": "first roast"},
+        ]
+        update = self._voice_reply_update(fake_bot)
+        context = SimpleNamespace(bot=fake_bot, user_data={})
+
+        captured = []
+
+        async def fake_roast(messages, points=None):
+            captured.append([dict(m) for m in messages])
+            return "answer to the spoken question"
+
+        with patch.object(bot, "_transcribe_voice_file", new=AsyncMock(return_value="why is that?")) as fake_transcribe, \
+                patch.object(bot.roast, "roast", new=fake_roast), \
+                patch.object(bot.state_store, "get_profile_points", return_value=[]), \
+                patch.object(bot.state_store, "record_voice") as record_voice:
+            await bot.handle_voice(update, context)
+
+        # Voice reply never enters the diary flow.
+        record_voice.assert_not_called()
+        fake_transcribe.assert_awaited_once_with(context, "voice-file-1")
+        self.assertEqual(captured, [[
+            {"role": "user", "content": "original entry"},
+            {"role": "assistant", "content": "first roast"},
+            {"role": "user", "content": "why is that?"},
+        ]])
+        self.assertEqual(bot._roast_chains["123:1001"], [
+            {"role": "user", "content": "original entry"},
+            {"role": "assistant", "content": "first roast"},
+            {"role": "user", "content": "why is that?"},
+            {"role": "assistant", "content": "answer to the spoken question"},
+        ])
+
+    async def test_voice_reply_with_empty_transcription_reports_and_stops(self):
+        fake_bot = FakeRoastBot()
+        bot._roast_chains["123:50"] = [{"role": "assistant", "content": "first roast"}]
+        update = self._voice_reply_update(fake_bot)
+        context = SimpleNamespace(bot=fake_bot, user_data={})
+
+        with patch.object(bot, "_transcribe_voice_file", new=AsyncMock(return_value="")), \
+                patch.object(bot.roast, "roast", new=AsyncMock()) as fake_roast:
+            await bot.handle_voice(update, context)
+
+        fake_roast.assert_not_awaited()
+        self.assertIn("did not recognize any speech", fake_bot.edits[-1]["text"])
+
+    async def test_voice_reply_transcription_failure_reports_error(self):
+        fake_bot = FakeRoastBot()
+        bot._roast_chains["123:50"] = [{"role": "assistant", "content": "first roast"}]
+        update = self._voice_reply_update(fake_bot)
+        context = SimpleNamespace(bot=fake_bot, user_data={})
+
+        with patch.object(bot, "_transcribe_voice_file", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+                patch.object(bot.roast, "roast", new=AsyncMock()) as fake_roast:
+            await bot.handle_voice(update, context)
+
+        fake_roast.assert_not_awaited()
+        self.assertEqual(fake_bot.edits[-1]["text"], "Error: boom")
+
+    async def test_voice_reply_to_unrelated_message_stays_in_diary_flow(self):
+        fake_bot = FakeRoastBot()
+        update = self._voice_reply_update(fake_bot, replied_to=999)
+        context = SimpleNamespace(
+            bot=fake_bot,
+            user_data={},
+            application=SimpleNamespace(create_task=lambda coro, update=None: coro.close()),
+        )
+
+        with patch.object(bot.state_store, "record_voice", return_value="key-1") as record_voice, \
+                patch.object(bot.state_store, "find_duplicate_voice", return_value=None), \
+                patch.object(bot, "_transcribe_voice_file", new=AsyncMock()) as fake_transcribe:
+            await bot.handle_voice(update, context)
+
+        record_voice.assert_called_once()
+        fake_transcribe.assert_not_awaited()
+
+
+class TranscribeVoiceFileTests(unittest.IsolatedAsyncioTestCase):
+    async def test_downloads_transcribes_and_removes_temp_file(self):
+        downloaded = []
+
+        async def fake_download(path):
+            downloaded.append(path)
+
+        fake_bot = SimpleNamespace(
+            get_file=AsyncMock(return_value=SimpleNamespace(download_to_drive=fake_download)),
+        )
+        context = SimpleNamespace(bot=fake_bot)
+
+        with patch.object(bot, "transcribe", new=AsyncMock(return_value="  spoken words  ")):
+            result = await bot._transcribe_voice_file(context, "file-9")
+
+        self.assertEqual(result, "spoken words")
+        fake_bot.get_file.assert_awaited_once_with("file-9")
+        self.assertEqual(len(downloaded), 1)
+        self.assertFalse(os.path.exists(downloaded[0]))
+
+    async def test_removes_temp_file_when_transcription_fails(self):
+        downloaded = []
+
+        async def fake_download(path):
+            downloaded.append(path)
+
+        fake_bot = SimpleNamespace(
+            get_file=AsyncMock(return_value=SimpleNamespace(download_to_drive=fake_download)),
+        )
+        context = SimpleNamespace(bot=fake_bot)
+
+        with patch.object(bot, "transcribe", new=AsyncMock(side_effect=RuntimeError("nope"))):
+            with self.assertRaises(RuntimeError):
+                await bot._transcribe_voice_file(context, "file-9")
+
+        self.assertFalse(os.path.exists(downloaded[0]))
