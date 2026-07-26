@@ -68,9 +68,9 @@ class StateStoreTests(unittest.TestCase):
             # Persisted and reloaded from disk.
             self.assertEqual(StateStore(path).get_profile_points(), ["likes hiking", "avoids conflict"])
 
-            over = [f"fact {i}" for i in range(state_store_module.MAX_PROFILE_POINTS + 3)]
-            store.set_profile_points(over)
-            self.assertEqual(len(store.get_profile_points()), state_store_module.MAX_PROFILE_POINTS)
+            many = [f"fact {i}" for i in range(150)]
+            store.set_profile_points(many)
+            self.assertEqual(len(store.get_profile_points()), 150)  # no mechanical cap on list size
 
     def test_recent_unprocessed_messages_returns_oldest_to_newest_within_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:

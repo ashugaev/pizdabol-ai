@@ -8,7 +8,6 @@ from typing import Any
 
 STATE_PATH = Path(os.getenv("BOT_STATE_PATH", ".data/message_state.json"))
 MAX_RETAINED_MESSAGES = 200
-MAX_PROFILE_POINTS = 100
 UNPROCESSED_STATUSES = {"received", "processing", "failed"}
 VOICE_DUPLICATE_STATUSES = {"drafted", "saved"}
 
@@ -216,9 +215,10 @@ class StateStore:
         return list(self.data["profile"].get("points", []))
 
     def set_profile_points(self, points: list[str]) -> None:
+        # No mechanical cap — the list size is guided at the prompt level.
         cleaned = [point.strip() for point in points if isinstance(point, str) and point.strip()]
         self.data["profile"] = {
-            "points": cleaned[:MAX_PROFILE_POINTS],
+            "points": cleaned,
             "updated_at": _now(),
         }
         self._save()
