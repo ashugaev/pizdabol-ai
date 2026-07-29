@@ -53,7 +53,7 @@ The button is available whenever the active AI provider's API key is set (see [C
 
 ### Author profile
 
-The bot distills a compact **author profile** — one-sentence facts about who you are — refreshed from **every diary message** (best-effort, in the background). It captures durable, decision-shaping context: long-term traits and biases, values, recurring patterns, key relationships and goals, and your current life phase (medium-term, not day-to-day). New knowledge is merged and semantically deduped; transient one-offs are dropped, and a message that adds nothing leaves the list unchanged. The points persist in local state and are fed back as background context on the next roast. Pick the model with `OPENAI_PROFILE_MODEL` (defaults to `OPENAI_SUMMARY_MODEL`).
+The bot distills a compact **author profile** — one-sentence facts about who you are — refreshed from **every diary message** (best-effort, in the background). It captures durable, decision-shaping context: long-term traits and biases, values, recurring patterns, key relationships and goals, and your current life phase (medium-term, not day-to-day). New knowledge is merged and semantically deduped; transient one-offs are dropped, and a message that adds nothing leaves the list unchanged. Under the hood the model returns only what changed (added, removed, reworded facts) and the merge happens locally, so the request cost stays flat as the profile grows; an unusable response leaves the accumulated profile intact. The points persist in local state and are fed back as background context on the next roast. Pick the model with `OPENAI_PROFILE_MODEL` (defaults to `OPENAI_SUMMARY_MODEL`).
 
 ### Rebuilding the profile retrospectively — `/memory`
 
