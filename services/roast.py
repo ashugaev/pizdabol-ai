@@ -11,9 +11,10 @@ ROAST_REASONING_EFFORT = "high"
 MAX_CONVERSATION_MESSAGES = 40
 
 # Compact author profile the model maintains across roasts.
-# The extractor echoes the whole profile back on every entry, so the budget has
-# to cover MAX_PROFILE_POINTS worth of output (~32 tokens per Russian point,
-# so ~3.2k) plus the reasoning tokens that count against the same ceiling.
+# The extractor answers with a delta, so a steady-state completion is tiny. The
+# budget is sized for the worst case instead — a first pass over a dense note
+# that adds many facts at once — with room for the reasoning tokens that count
+# against the same ceiling.
 PROFILE_MAX_COMPLETION_TOKENS = 8192
 # Pinned low: this is mechanical merge/dedup work, and on reasoning models any
 # effort left unpinned eats the completion budget and truncates the answer.
@@ -42,14 +43,20 @@ PROFILE_EXTRACTION_PROMPT = f"""Ты ведёшь компактный проф�
 - Держи примерно до {MAX_PROFILE_POINTS} самых важных фактов, лучше меньше; если их становится больше — объединяй и убирай слабое, а не обрезай по счётчику.
 - Семантический дедуп: объединяй факты, которые значат одно и то же, никогда не выдавай почти-дубли и переформулировки уже известного.
 - Обновляй факт, если запись его уточняет или он устарел (особенно текущую фазу); убирай то, что перестало быть правдой.
-- Если новая запись не добавляет ничего реально нового и устойчивого — верни уже известные факты БЕЗ ИЗМЕНЕНИЙ, дословно.
 - Лучше вернуть меньше фактов, чем добавить дубль или шум.
 - Пиши на русском.
-Верни СТРОГО JSON вида {{"points": ["...", "..."]}} без пояснений."""
+
+Ты возвращаешь ТОЛЬКО ИЗМЕНЕНИЯ профиля, а не профиль целиком. Уже известные факты, которых ты не тронул, сохраняются сами — НЕ перечисляй их.
+Верни СТРОГО JSON вида {{"add": ["..."], "remove": ["..."], "update": [{{"from": "...", "to": "..."}}]}} без пояснений.
+- "add" — новые устойчивые факты, которых ещё нет в known_facts.
+- "remove" — факты из known_facts, которые перестали быть правдой. Строку копируй из known_facts ДОСЛОВНО.
+- "update" — переформулировка или уточнение известного факта: "from" — дословная строка из known_facts, "to" — новая версия. Через update же объединяй дубли: один from -> to, остальные дубли в remove.
+- Если запись не добавляет ничего реально нового и устойчивого — верни {{"add": [], "remove": [], "update": []}}. Это нормальный и частый ответ.
+- Если фактов стало заметно больше {MAX_PROFILE_POINTS} — объединяй близкие через update и убирай слабые через remove."""
 
 # Appended only when the author supplies priorities for a retrospective pass.
 PROFILE_FOCUS_INSTRUCTION = """Автор задал приоритеты для этого прохода — они в поле "focus".
-Считай их главным фильтром: в первую очередь вытаскивай и уточняй то, что относится к focus, и переформулируй уже известные факты под эти акценты.
+Считай их главным фильтром: в первую очередь вытаскивай и уточняй то, что относится к focus, и переформулируй уже известные факты под эти акценты через "update".
 Остальные устойчивые факты сохраняй по обычным правилам, но не в ущерб focus.
 Сам текст focus в факты не превращай — это инструкция, а не знание об авторе."""
 
@@ -154,6 +161,57 @@ def _normalize_points(points: list) -> list[str]:
     return result
 
 
+def _point_key(text: str) -> str:
+    """Match key for referring to a known fact. Whitespace- and case-insensitive
+    so a model that reflows or recases a quoted fact still matches it."""
+    return " ".join(str(text).split()).lower()
+
+
+def _clean_strings(values) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    return [" ".join(v.split()) for v in values if isinstance(v, str) and v.strip()]
+
+
+def _update_map(values) -> dict[str, str]:
+    """`[{"from": known, "to": revised}]` -> {match key of known: revised}."""
+    if not isinstance(values, list):
+        return {}
+    pairs = {}
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        source, target = item.get("from"), item.get("to")
+        if isinstance(source, str) and isinstance(target, str) and source.strip() and target.strip():
+            pairs[_point_key(source)] = " ".join(target.split())
+    return pairs
+
+
+def _apply_profile_delta(existing: list[str], delta: dict) -> list[str]:
+    """Fold a `{add, remove, update}` delta into the known facts.
+
+    Existing order is preserved: updates rewrite in place, removals drop out,
+    and additions land at the end. A removal wins over an update of the same
+    fact, and an update whose "from" matches nothing is kept as an addition
+    rather than discarded — the model meant to record it either way."""
+    if not isinstance(delta, dict):
+        return _normalize_points(existing)
+    removals = {_point_key(text) for text in _clean_strings(delta.get("remove"))}
+    updates = _update_map(delta.get("update"))
+
+    result = []
+    for point in existing:
+        key = _point_key(point)
+        if key in removals:
+            updates.pop(key, None)
+            continue
+        result.append(updates.pop(key, point))
+
+    result.extend(updates.values())
+    result.extend(_clean_strings(delta.get("add")))
+    return _normalize_points(result)
+
+
 async def extract_profile_points(
     diary_text: str,
     existing_points: list[str] | None = None,
@@ -162,12 +220,18 @@ async def extract_profile_points(
     """Distill a compact, deduped set of durable facts about the author from a diary
     entry, merged with what is already known. Returns the normalized full list.
 
+    The model answers with a `{add, remove, update}` delta rather than the whole
+    profile, so the completion size tracks how much actually changed instead of
+    how much has been learned — the profile can grow without approaching the
+    output ceiling. The merge happens here, in code.
+
     `focus` carries the author's priorities for this extraction, if any: it steers
     what gets pulled out and how known facts are reframed, never what is stored."""
     if not is_configured():
         raise RuntimeError("AI provider API key is not configured")
 
-    request = {"diary_entry": diary_text, "known_facts": existing_points or []}
+    existing = _normalize_points(existing_points or [])
+    request = {"diary_entry": diary_text, "known_facts": existing}
     system_prompt = PROFILE_EXTRACTION_PROMPT
     if focus:
         request["focus"] = focus
@@ -190,11 +254,11 @@ async def extract_profile_points(
     text = _extract_text(response)
     if text:
         try:
-            return _normalize_points(json.loads(text).get("points", []))
+            return _apply_profile_delta(existing, json.loads(text))
         except json.JSONDecodeError:
             pass
     logger.warning(
         "Profile extraction returned no usable JSON (finish_reason=%s); keeping the existing profile",
         _finish_reason(response),
     )
-    return _normalize_points(existing_points or [])
+    return existing
