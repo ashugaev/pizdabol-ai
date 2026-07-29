@@ -13,9 +13,14 @@ os.environ.setdefault("ALLOWED_USER_ID", "1")
 from services import roast
 
 
-def _chat_response(text):
+def _chat_response(text, finish_reason="stop"):
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=text))]
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=text),
+                finish_reason=finish_reason,
+            )
+        ]
     )
 
 
@@ -179,13 +184,53 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["messages"][0]["content"], roast.PROFILE_EXTRACTION_PROMPT)
         self.assertNotIn('"focus"', kwargs["messages"][1]["content"])
 
-    async def test_extract_profile_points_raises_when_empty(self):
-        fake = FakeOpenAI(_chat_response(""))
+    async def test_extract_profile_points_uses_budget_and_pinned_reasoning_effort(self):
+        fake = FakeOpenAI(_chat_response(json.dumps({"points": ["fact"]})))
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
-            with self.assertRaisesRegex(RuntimeError, "empty response"):
-                await roast.extract_profile_points("entry", [])
+            await roast.extract_profile_points("entry", [])
+
+        kwargs = fake.chat.completions.calls[0]
+        self.assertEqual(kwargs["max_completion_tokens"], roast.PROFILE_MAX_COMPLETION_TOKENS)
+        self.assertEqual(kwargs["reasoning_effort"], roast.PROFILE_REASONING_EFFORT)
+
+    def test_profile_budget_covers_a_full_profile_echo(self):
+        # The extractor echoes the whole profile back on every entry, so the
+        # budget must fit MAX_PROFILE_POINTS worth of output with room left for
+        # reasoning tokens, which count against the same ceiling. Russian points
+        # run ~32 tokens each; a 1024 budget silently truncated past ~31 points.
+        worst_case_output = roast.MAX_PROFILE_POINTS * 32
+        self.assertGreater(roast.PROFILE_MAX_COMPLETION_TOKENS, worst_case_output * 2)
+
+    async def test_extract_profile_points_keeps_existing_profile_when_truncated(self):
+        # A truncated completion has no content. Accumulated knowledge must
+        # survive it: return what we already knew instead of raising.
+        fake = FakeOpenAI(_chat_response("", finish_reason="length"))
+
+        with patch.object(roast.settings, "openai_api_key", "key"), \
+                patch.object(roast, "client", fake):
+            points = await roast.extract_profile_points("entry", ["known fact", "other fact"])
+
+        self.assertEqual(points, ["known fact", "other fact"])
+
+    async def test_extract_profile_points_keeps_existing_profile_on_partial_json(self):
+        # Running out of budget mid-object yields unparseable JSON, not an empty
+        # string — the same no-op path has to cover it.
+        fake = FakeOpenAI(_chat_response('{"points": ["half a fa', finish_reason="length"))
+
+        with patch.object(roast.settings, "openai_api_key", "key"), \
+                patch.object(roast, "client", fake):
+            points = await roast.extract_profile_points("entry", ["known fact"])
+
+        self.assertEqual(points, ["known fact"])
+
+    async def test_extract_profile_points_returns_empty_when_truncated_with_no_history(self):
+        fake = FakeOpenAI(_chat_response("", finish_reason="length"))
+
+        with patch.object(roast.settings, "openai_api_key", "key"), \
+                patch.object(roast, "client", fake):
+            self.assertEqual(await roast.extract_profile_points("entry", []), [])
 
     def test_is_configured_reflects_api_key(self):
         with patch.object(roast.settings, "ai_api_key", "key"):

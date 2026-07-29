@@ -11,7 +11,13 @@ ROAST_REASONING_EFFORT = "high"
 MAX_CONVERSATION_MESSAGES = 40
 
 # Compact author profile the model maintains across roasts.
-PROFILE_MAX_COMPLETION_TOKENS = 1024
+# The extractor echoes the whole profile back on every entry, so the budget has
+# to cover MAX_PROFILE_POINTS worth of output (~32 tokens per Russian point,
+# so ~3.2k) plus the reasoning tokens that count against the same ceiling.
+PROFILE_MAX_COMPLETION_TOKENS = 8192
+# Pinned low: this is mechanical merge/dedup work, and on reasoning models any
+# effort left unpinned eats the completion budget and truncates the answer.
+PROFILE_REASONING_EFFORT = "low"
 # Soft guidance passed to the model only — never enforced mechanically.
 MAX_PROFILE_POINTS = 100
 MAX_PROFILE_POINT_LENGTH = 200
@@ -88,6 +94,14 @@ def _extract_text(response) -> str:
     return (getattr(message, "content", None) or "").strip()
 
 
+def _finish_reason(response) -> str:
+    """Why the model stopped, for logs. `"length"` means the completion budget ran out."""
+    choices = getattr(response, "choices", None) or []
+    if not choices:
+        return "unknown"
+    return getattr(choices[0], "finish_reason", None) or "unknown"
+
+
 def _trim_chain(messages: list[dict]) -> list[dict]:
     return messages[-MAX_CONVERSATION_MESSAGES:]
 
@@ -151,14 +165,24 @@ async def extract_profile_points(
     response = await client.chat.completions.create(
         model=settings.profile_model,
         max_completion_tokens=PROFILE_MAX_COMPLETION_TOKENS,
+        reasoning_effort=PROFILE_REASONING_EFFORT,
         response_format={"type": "json_object"},
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": payload},
         ],
     )
+    # A completion that ran out of budget comes back either empty or as partial
+    # JSON. The profile is accumulated knowledge, so both degrade to a no-op:
+    # keeping what we already know beats failing the caller or losing the list.
     text = _extract_text(response)
-    if not text:
-        raise RuntimeError("AI provider returned an empty response")
-    data = json.loads(text)
-    return _normalize_points(data.get("points", []))
+    if text:
+        try:
+            return _normalize_points(json.loads(text).get("points", []))
+        except json.JSONDecodeError:
+            pass
+    logger.warning(
+        "Profile extraction returned no usable JSON (finish_reason=%s); keeping the existing profile",
+        _finish_reason(response),
+    )
+    return _normalize_points(existing_points or [])
