@@ -27,10 +27,12 @@ You'll need a Telegram bot token, an OpenAI API key, and a Notion integration + 
 | Command | Description |
 |---------|-------------|
 | `/start` | Welcome and quick overview |
-| `/help` | Usage instructions |
+| `/help` | Commands and preview buttons |
 | `/weekly` | Generate the weekly highlight report now |
 | `/stat` | Saved audio minutes overall, by day, and by month |
 | `/memory` | Rebuild the author profile from every saved note, guided by focus points you supply |
+
+The bot publishes this list to Telegram on startup, so typing `/` in the chat shows it.
 
 ## Docs
 

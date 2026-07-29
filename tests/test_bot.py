@@ -1008,9 +1008,36 @@ class MainRegistrationTests(unittest.TestCase):
         }
 
         self.assertEqual(set(command_filters), {"start", "help", "weekly", "stat", "memory"})
+        self.assertEqual(set(command_filters), {name for name, _ in bot.COMMANDS})
         for command, command_filter in command_filters.items():
             with self.subTest(command=command):
                 self.assertEqual(command_filter.user_ids, frozenset({bot.settings.allowed_user_id}))
+
+    def test_help_text_lists_every_command(self):
+        for name, description in bot.COMMANDS:
+            with self.subTest(command=name):
+                self.assertIn(f"/{name} — {description}", bot.HELP_TEXT)
+
+
+class PostInitTests(unittest.IsolatedAsyncioTestCase):
+    async def test_post_init_publishes_command_menu_then_replays(self):
+        bot_api = SimpleNamespace(published=None)
+
+        async def set_my_commands(commands):
+            bot_api.published = commands
+
+        bot_api.set_my_commands = set_my_commands
+        application = SimpleNamespace(bot=bot_api)
+        replayed = []
+
+        with patch.object(bot, "replay_unprocessed_messages", new=AsyncMock(side_effect=replayed.append)):
+            await bot.post_init(application)
+
+        self.assertEqual(
+            [(command.command, command.description) for command in bot_api.published],
+            [(name, description) for name, description in bot.COMMANDS],
+        )
+        self.assertEqual(replayed, [application])
 
 
 class FakeSendBot:

@@ -1,5 +1,7 @@
 # Usage
 
+Commands live in Telegram's `/` menu (published on startup); `/help` prints the same list plus the preview buttons.
+
 ## How it works
 
 1. You send a voice (or text) message to the bot.
