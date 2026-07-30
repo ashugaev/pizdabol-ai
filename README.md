@@ -1,12 +1,12 @@
-# Noter
+# Pizdabol
 
 A Telegram bot that turns your voice (or text) messages into structured diary entries in Notion — with optional AI cleanup, daily and weekly summaries, and a blunt-but-caring "roast" mode. Built for the [Notion Journal](https://www.notion.com/help/guides/journal).
 
 ## Quick start
 
 ```bash
-git clone https://github.com/shataev/audio-noter-bot.git
-cd audio-noter-bot
+git clone https://github.com/ashugaev/pizdabol-ai.git
+cd pizdabol-ai
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # fill in your tokens
