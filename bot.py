@@ -80,7 +80,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("memory", "Rebuild author profile from all notes"),
 )
 
-WELCOME_TEXT = """👋 Noter here.
+WELCOME_TEXT = """👋 Pizdabol here.
 
 Send voice or text. I transcribe, add title and tags, show a preview. You edit, press Save, it lands in Notion.
 

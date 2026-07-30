@@ -19,7 +19,7 @@ Pushes to GitHub, pulls on the VPS, and restarts the bot.
 ## First-time VPS setup
 
 ```bash
-git clone https://github.com/shataev/audio-noter-bot.git /opt/noter
+git clone https://github.com/ashugaev/pizdabol-ai.git /opt/noter
 cd /opt/noter
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
@@ -30,7 +30,7 @@ Create `/etc/systemd/system/noter.service`:
 
 ```ini
 [Unit]
-Description=Noter Telegram Bot
+Description=Pizdabol Telegram Bot
 After=network.target
 
 [Service]
