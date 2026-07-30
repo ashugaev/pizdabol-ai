@@ -1,0 +1,29 @@
+projects:
+  diary-bot:
+    name: "diary-bot"
+    path: .
+    defaultBranch: main
+    sessionPrefix: diary-bot
+    sources:
+      gh:
+        type: github
+    triggers:
+      # PR merged -> session completes itself and its worktree is removed.
+      gh-merged:
+        source: gh
+        event: github:merged
+        send:
+          prompt: |
+            PR merged. Work done.
+            Confirm merge: gh pr view --json state,mergedAt.
+            Then run "$SPUR_SESSION_TOOL_DIR/spur-self-destruct" to complete and remove this session.
+            Do not start new work. Do not ask questions.
+      # PR closed without merge -> same teardown.
+      gh-closed:
+        source: gh
+        event: github:closed
+        send:
+          prompt: |
+            PR closed without merge. Work stopped.
+            Run "$SPUR_SESSION_TOOL_DIR/spur-self-destruct" to complete and remove this session.
+            Do not start new work. Do not ask questions.
