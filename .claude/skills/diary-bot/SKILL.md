@@ -19,6 +19,7 @@ Use this as project memory for implementation and validation.
 | Daily and weekly summaries (provider-neutral) | `services/summary.py`, `tests/test_openai_services.py` |
 | Notion schema, retries, duplicate checks, writes | `services/notion.py`, `tests/test_notion.py` |
 | Retrospective profile rebuild (`/memory`) | `services/profile_rebuild.py`, `tests/test_profile_rebuild.py` |
+| Roast persona, author profile, behavior rules | `services/roast.py`, `tests/test_roast.py` |
 | Local message and draft state | `services/state_store.py`, `tests/test_state_store.py` |
 | Dev, test, deploy commands | `Makefile`, `README.md`, `.github/workflows/ci.yml` |
 
@@ -32,6 +33,7 @@ Use this as project memory for implementation and validation.
 - Notion save retries transient errors and verifies created page before marking saved.
 - Long transcriptions use metadata-only formatting and keep original text.
 - `/memory` rebuild is two-step (focus prompt, then confirm), sequential, single-flight, and persists points after every note.
+- Behavior rules outrank the roast persona, are amended by the model in any turn via a trailing `RULES_MARKER` delta block, and are stripped from the reply. No delta or a no-op delta must never rewrite stored state.
 
 ## External boundaries
 

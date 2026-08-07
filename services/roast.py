@@ -1,5 +1,6 @@
 import json
 import logging
+from typing import NamedTuple
 
 from config import settings
 from services.ai import create_chat_client
@@ -9,6 +10,14 @@ logger = logging.getLogger(__name__)
 ROAST_MAX_COMPLETION_TOKENS = 4096
 ROAST_REASONING_EFFORT = "high"
 MAX_CONVERSATION_MESSAGES = 40
+
+# Standing behavior rules the author dictates in conversation ("stop asking
+# questions", "swear less"). They outrank the persona and are amended by the
+# roast model itself: it appends a delta block to its own reply, marked by
+# RULES_MARKER, which is stripped before the reply reaches Telegram.
+RULES_MARKER = "<<<RULES>>>"
+# Soft guidance passed to the model only — never enforced mechanically.
+MAX_RULE_LENGTH = 120
 
 # Compact author profile the model maintains across roasts.
 # The extractor answers with a delta, so a steady-state completion is tiny. The
@@ -87,12 +96,34 @@ DEFAULT_SYSTEM_PROMPT = """Ты — чёткий пацан, братан авт
 
 Если чел отвечает на твоё сообщение — продолжаешь разговор, держа в голове весь предыдущий тред."""
 
+RULES_HEADER = """Правила поведения, которые задал сам автор. Они ГЛАВНЕЕ всего написанного выше: при конфликте с персоной выигрывают они."""
+
+# Always appended, even with an empty rules list — this is how the first rule
+# ever gets recorded.
+RULES_PROTOCOL_PROMPT = f"""Список правил поведения ты ведёшь сам и можешь менять его в ЛЮБОМ ответе: хоть в первом разъёбе, хоть в follow-up реплике. Если списка выше нет — он пока пустой.
+- Автор просит вести себя иначе, поправляет тебя, задаёт рамку на будущее — добавь правило. Просит забыть или отменяет прошлое — убери.
+- Только устойчивое «как себя вести». Факты про автора сюда НЕ пиши, для них есть отдельный профиль.
+- Одно правило — одно короткое простое предложение в повелительном наклонении, до {MAX_RULE_LENGTH} символов.
+- Не добавляй то, что по смыслу уже есть в списке.
+Чтобы поменять список, допиши в САМЫЙ КОНЕЦ ответа отдельную строку:
+{RULES_MARKER}{{"add": ["..."], "remove": ["..."], "update": [{{"from": "...", "to": "..."}}]}}
+- "add" — новые правила. "remove" — правила из списка, строку копируй ДОСЛОВНО. "update" — переформулировка: "from" дословно из списка, "to" — новая версия.
+- Менять нечего — просто НЕ пиши эту строку. Так в подавляющем большинстве ответов.
+- После этой строки не пиши ничего. Автор её не видит: маркер и JSON в тексте ответа не упоминай и не пересказывай."""
+
+
+class RoastReply(NamedTuple):
+    """Visible answer plus the rules delta the model attached to it, if any."""
+
+    text: str
+    rules_delta: dict | None
+
 
 def is_configured() -> bool:
     return bool(settings.ai_api_key)
 
 
-def system_prompt(points: list[str] | None = None) -> str:
+def system_prompt(points: list[str] | None = None, rules: list[str] | None = None) -> str:
     base = settings.roast_system_prompt or DEFAULT_SYSTEM_PROMPT
     language = (settings.roast_language or "").strip()
     if language:
@@ -102,7 +133,11 @@ def system_prompt(points: list[str] | None = None) -> str:
         base = (
             f"{base}\n\nЧто ты уже знаешь об авторе (фон для понимания, не пересказывай это в лоб):\n{joined}"
         )
-    return base
+    # Last, so the rules read as the final word over everything above them.
+    if rules:
+        joined = "\n".join(f"- {rule}" for rule in rules)
+        base = f"{base}\n\n{RULES_HEADER}\n{joined}"
+    return f"{base}\n\n{RULES_PROTOCOL_PROMPT}"
 
 
 client = create_chat_client()
@@ -128,7 +163,34 @@ def _trim_chain(messages: list[dict]) -> list[dict]:
     return messages[-MAX_CONVERSATION_MESSAGES:]
 
 
-async def roast(messages: list[dict], points: list[str] | None = None) -> str:
+def split_rules_update(answer: str) -> RoastReply:
+    """Cut the optional trailing rules block off an answer.
+
+    No marker means no change — the normal case, and the reason a steady-state
+    reply costs nothing extra. A marker with unreadable JSON is dropped along
+    with the block: the author never sees protocol scaffolding, and a delta we
+    cannot parse changes nothing on disk."""
+    head, marker, tail = answer.partition(RULES_MARKER)
+    if not marker:
+        return RoastReply(answer.strip(), None)
+    # Cut at the first marker: whatever follows is protocol, and the author must
+    # never see it. A model that fenced the block leaves stray backticks around it.
+    text = head.strip().rstrip("`").strip()
+    try:
+        # raw_decode, not loads: it takes the leading object and ignores any
+        # trailing junk — a closing fence, a second block, a stray line.
+        delta, _ = json.JSONDecoder().raw_decode(tail.strip().lstrip("`").strip())
+    except ValueError:
+        logger.warning("Roast reply carried an unparseable rules block; ignoring it")
+        return RoastReply(text, None)
+    return RoastReply(text, delta if isinstance(delta, dict) else None)
+
+
+async def roast(
+    messages: list[dict],
+    points: list[str] | None = None,
+    rules: list[str] | None = None,
+) -> RoastReply:
     if not is_configured():
         raise RuntimeError("AI provider API key is not configured")
 
@@ -136,12 +198,14 @@ async def roast(messages: list[dict], points: list[str] | None = None) -> str:
         model=settings.roast_model,
         max_completion_tokens=ROAST_MAX_COMPLETION_TOKENS,
         reasoning_effort=ROAST_REASONING_EFFORT,
-        messages=[{"role": "system", "content": system_prompt(points)}] + _trim_chain(messages),
+        messages=(
+            [{"role": "system", "content": system_prompt(points, rules)}] + _trim_chain(messages)
+        ),
     )
-    text = _extract_text(response)
-    if not text:
+    reply = split_rules_update(_extract_text(response))
+    if not reply.text:
         raise RuntimeError("AI provider returned an empty response")
-    return text
+    return reply
 
 
 def _normalize_points(points: list) -> list[str]:
@@ -190,8 +254,11 @@ def _update_map(values) -> dict[str, str]:
     return pairs
 
 
-def _apply_profile_delta(existing: list[str], delta: dict) -> list[str]:
-    """Fold a `{add, remove, update}` delta into the known facts.
+def apply_delta(existing: list[str], delta: dict) -> list[str]:
+    """Fold a `{add, remove, update}` delta into a kept list of lines.
+
+    Shared by the author profile and the behavior rules — both are accumulated
+    lists the model amends with a delta instead of rewriting whole.
 
     Existing order is preserved: updates rewrite in place, removals drop out,
     and additions land at the end. A removal wins over an update of the same
@@ -257,7 +324,7 @@ async def extract_profile_points(
     text = _extract_text(response)
     if text:
         try:
-            return _apply_profile_delta(existing, json.loads(text))
+            return apply_delta(existing, json.loads(text))
         except json.JSONDecodeError:
             pass
     logger.warning(

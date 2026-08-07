@@ -23,7 +23,13 @@ class StateStore:
 
     def _load(self) -> dict[str, Any]:
         if not self.path.exists():
-            return {"version": 1, "messages": {}, "drafts": {}, "profile": {"points": []}}
+            return {
+                "version": 1,
+                "messages": {},
+                "drafts": {},
+                "profile": {"points": []},
+                "rules": {"items": []},
+            }
         with self.path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         data.setdefault("version", 1)
@@ -31,6 +37,8 @@ class StateStore:
         data.setdefault("drafts", {})
         data.setdefault("profile", {})
         data["profile"].setdefault("points", [])
+        data.setdefault("rules", {})
+        data["rules"].setdefault("items", [])
         return data
 
     def _save(self) -> None:
@@ -219,6 +227,20 @@ class StateStore:
         cleaned = [point.strip() for point in points if isinstance(point, str) and point.strip()]
         self.data["profile"] = {
             "points": cleaned,
+            "updated_at": _now(),
+        }
+        self._save()
+
+    def get_rules(self) -> list[str]:
+        """Standing behavior rules the author dictated to the bot."""
+        return list(self.data["rules"].get("items", []))
+
+    def set_rules(self, rules: list[str]) -> None:
+        # Callers only write when the list actually changed — an unchanged list
+        # never touches disk.
+        cleaned = [rule.strip() for rule in rules if isinstance(rule, str) and rule.strip()]
+        self.data["rules"] = {
+            "items": cleaned,
             "updated_at": _now(),
         }
         self._save()

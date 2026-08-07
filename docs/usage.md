@@ -53,6 +53,14 @@ Reply to any roast message to keep the thread going; the bot sends the whole pri
 
 The button is available whenever the active AI provider's API key is set (see [Configuration](configuration.md)). The persona is built in but can be replaced with `ROAST_SYSTEM_PROMPT`; set `ROAST_LANGUAGE` to force a reply language regardless of the entry's language.
 
+### Behavior rules — `/rules`
+
+Separate from the profile, the bot keeps a short list of **behavior rules** — standing instructions on how it should act ("stop asking questions", "swear less", "be blunter about money"). They are injected at the end of the roast system prompt and **outrank the persona**: on conflict, the rules win.
+
+You never edit the list by hand. Tell the bot in a roast reply how it should behave — or that it should forget a rule — and it rewrites the list itself. This works **in any turn**: the first roast, a follow-up, a voice reply. The model appends a compact delta (added, removed, reworded rules) to the end of its answer behind an internal marker; the bot strips the marker, merges the delta locally, and posts a short `🧠 Rules updated` note. When nothing should change the model sends no delta at all, so a normal reply costs nothing extra and **local state is never rewritten**. An unreadable delta is dropped and changes nothing.
+
+`/rules` prints the current numbered list. Rules persist in local state and are fed into every roast.
+
 ### Author profile
 
 The bot distills a compact **author profile** — one-sentence facts about who you are — refreshed from **every diary message** (best-effort, in the background). It captures durable, decision-shaping context: long-term traits and biases, values, recurring patterns, key relationships and goals, and your current life phase (medium-term, not day-to-day). New knowledge is merged and semantically deduped; transient one-offs are dropped, and a message that adds nothing leaves the list unchanged. Under the hood the model returns only what changed (added, removed, reworded facts) and the merge happens locally, so the request cost stays flat as the profile grows; an unusable response leaves the accumulated profile intact. The points persist in local state and are fed back as background context on the next roast. Pick the model with `OPENAI_PROFILE_MODEL` (defaults to `OPENAI_SUMMARY_MODEL`).

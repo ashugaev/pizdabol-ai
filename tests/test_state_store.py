@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -71,6 +72,28 @@ class StateStoreTests(unittest.TestCase):
             many = [f"fact {i}" for i in range(150)]
             store.set_profile_points(many)
             self.assertEqual(len(store.get_profile_points()), 150)  # no mechanical cap on list size
+
+    def test_rules_default_persist_and_clean(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state.json"
+            store = StateStore(path)
+            self.assertEqual(store.get_rules(), [])
+
+            store.set_rules(["  не задавай вопросов ", "", "пиши коротко", 5])
+            self.assertEqual(store.get_rules(), ["не задавай вопросов", "пиши коротко"])
+            self.assertEqual(StateStore(path).get_rules(), ["не задавай вопросов", "пиши коротко"])
+
+    def test_state_written_before_rules_existed_still_loads(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state.json"
+            path.write_text(
+                json.dumps({"version": 1, "messages": {}, "drafts": {}, "profile": {"points": ["old"]}}),
+                encoding="utf-8",
+            )
+            store = StateStore(path)
+
+            self.assertEqual(store.get_rules(), [])
+            self.assertEqual(store.get_profile_points(), ["old"])
 
     def test_recent_unprocessed_messages_returns_oldest_to_newest_within_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
