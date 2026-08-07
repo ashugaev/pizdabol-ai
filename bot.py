@@ -78,6 +78,7 @@ COMMANDS: tuple[tuple[str, str], ...] = (
     ("weekly", "Weekly highlights now"),
     ("stat", "Saved audio minutes"),
     ("memory", "Rebuild author profile from all notes"),
+    ("rules", "Behavior rules you taught me"),
 )
 
 WELCOME_TEXT = """👋 Pizdabol here.
@@ -689,9 +690,30 @@ async def _update_profile_points(diary_text: str) -> None:
         logger.exception("Failed to update roast profile points")
 
 
-async def _run_roast(reply_target, chain: list[dict], context, status_message=None, points=None) -> None:
+async def _persist_rules_delta(reply_target, chain: list[dict], before: list[str], delta: dict | None) -> None:
+    """Store a rules delta the model attached to its reply and tell the author.
+
+    No delta, or a delta that changes nothing, leaves the stored list untouched:
+    the model only sends one when it actually wants the rules changed."""
+    if not delta:
+        return
+    after = roast.apply_delta(before, delta)
+    if after == before:
+        return
+    state_store.set_rules(after)
+    lines = ["🧠 Rules updated"]
+    lines += [f"+ {rule}" for rule in after if rule not in before]
+    lines += [f"− {rule}" for rule in before if rule not in after]
+    note = await _reply_to_source(reply_target, "\n".join(lines))
+    # Map the note to the chain too, so replying to it keeps the conversation.
+    _store_roast_chain(_message_chat_id(note), note.message_id, chain)
+
+
+async def _run_roast(reply_target, chain: list[dict], context, status_message=None) -> None:
+    points = state_store.get_profile_points()
+    rules = state_store.get_rules()
     try:
-        answer = await roast.roast(chain, points=points)
+        reply = await roast.roast(chain, points=points, rules=rules)
     except Exception as e:
         logger.exception("Error generating roast")
         error_text = f"Roast failed: {e}"
@@ -700,8 +722,12 @@ async def _run_roast(reply_target, chain: list[dict], context, status_message=No
         else:
             await _reply_to_source(reply_target, error_text)
         return
-    chain.append({"role": "assistant", "content": answer})
-    await _deliver_roast(reply_target, chain, context, status_message=status_message)
+    chain.append({"role": "assistant", "content": reply.text})
+    last = await _deliver_roast(reply_target, chain, context, status_message=status_message)
+    try:
+        await _persist_rules_delta(last, chain, rules, reply.rules_delta)
+    except Exception:
+        logger.exception("Failed to persist roast rules update")
 
 
 async def _roast_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) -> None:
@@ -716,8 +742,7 @@ async def _roast_draft(query, context: ContextTypes.DEFAULT_TYPE, draft: dict) -
 
     status = await _reply_to_source(query.message, "🔥 Roasting...")
     chain = [{"role": "user", "content": text}]
-    points = state_store.get_profile_points()
-    await _run_roast(query.message, chain, context, status_message=status, points=points)
+    await _run_roast(query.message, chain, context, status_message=status)
 
 
 async def _handle_roast_followup(update: Update, context: ContextTypes.DEFAULT_TYPE, chain: list[dict]) -> None:
@@ -729,8 +754,7 @@ async def _handle_roast_followup(update: Update, context: ContextTypes.DEFAULT_T
 
     new_chain = list(chain) + [{"role": "user", "content": reply_text}]
     status = await _reply_to_source(user_msg, "🔥 Thinking...")
-    points = state_store.get_profile_points()
-    await _run_roast(user_msg, new_chain, context, status_message=status, points=points)
+    await _run_roast(user_msg, new_chain, context, status_message=status)
 
 
 async def _handle_roast_voice_followup(
@@ -763,8 +787,7 @@ async def _handle_roast_voice_followup(
     )
     new_chain = list(chain) + [{"role": "user", "content": reply_text}]
     await _edit_reply_message(context, status, "🔥 Thinking...")
-    points = state_store.get_profile_points()
-    await _run_roast(user_msg, new_chain, context, status_message=status, points=points)
+    await _run_roast(user_msg, new_chain, context, status_message=status)
 
 
 async def post_init(application: Application) -> None:
@@ -830,6 +853,19 @@ async def _send_source_jump(
 
 async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(HELP_TEXT, parse_mode="Markdown")
+
+
+async def handle_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the standing behavior rules. Editing happens in conversation: tell
+    the bot how to act, or to forget a rule, and it rewrites the list itself."""
+    rules = state_store.get_rules()
+    if not rules:
+        await update.effective_message.reply_text(
+            "🧠 No rules yet. Tell me in a roast reply how to behave — I'll remember it."
+        )
+        return
+    lines = ["🧠 Rules"] + [f"{index}. {rule}" for index, rule in enumerate(rules, 1)]
+    await update.effective_message.reply_text("\n".join(lines))
 
 
 async def _transcribe_voice_file(context: ContextTypes.DEFAULT_TYPE, file_id: str) -> str:
@@ -1745,6 +1781,7 @@ def main() -> None:
         CommandHandler("weekly", handle_weekly, filters=user_filter),
         CommandHandler("stat", handle_stat, filters=user_filter),
         CommandHandler("memory", handle_memory, filters=user_filter),
+        CommandHandler("rules", handle_rules, filters=user_filter),
     ]
 
     for handler in command_handlers:

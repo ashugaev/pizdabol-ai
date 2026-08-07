@@ -2,7 +2,7 @@ import os
 import unittest
 from datetime import date
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from telegram.ext import CommandHandler
 
@@ -1007,7 +1007,7 @@ class MainRegistrationTests(unittest.TestCase):
             for handler in command_handlers
         }
 
-        self.assertEqual(set(command_filters), {"start", "help", "weekly", "stat", "memory"})
+        self.assertEqual(set(command_filters), {"start", "help", "weekly", "stat", "memory", "rules"})
         self.assertEqual(set(command_filters), {name for name, _ in bot.COMMANDS})
         for command, command_filter in command_filters.items():
             with self.subTest(command=command):
@@ -1282,6 +1282,26 @@ class RoastKeyboardTests(unittest.TestCase):
         self.assertNotIn("roast:entry-1", callback_data)
 
 
+def _roast_reply(text, rules_delta=None):
+    return bot.roast.RoastReply(text, rules_delta)
+
+
+class RulesCommandTests(unittest.IsolatedAsyncioTestCase):
+    async def _run(self, rules):
+        reply_text = AsyncMock()
+        update = SimpleNamespace(effective_message=SimpleNamespace(reply_text=reply_text))
+        with patch.object(bot.state_store, "get_rules", return_value=rules):
+            await bot.handle_rules(update, SimpleNamespace())
+        return reply_text.await_args.args[0]
+
+    async def test_rules_command_numbers_the_stored_rules(self):
+        text = await self._run(["не задавай вопросов", "пиши коротко"])
+        self.assertEqual(text, "🧠 Rules\n1. не задавай вопросов\n2. пиши коротко")
+
+    async def test_rules_command_explains_an_empty_list(self):
+        self.assertIn("No rules yet", await self._run([]))
+
+
 class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         bot._roast_chains.clear()
@@ -1299,21 +1319,28 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
 
         captured = []
         captured_points = []
+        captured_rules = []
 
-        async def fake_roast(messages, points=None):
+        async def fake_roast(messages, points=None, rules=None):
             captured.append([dict(m) for m in messages])
             captured_points.append(points)
-            return "Roast ready."
+            captured_rules.append(rules)
+            return _roast_reply("Roast ready.")
 
         with patch.object(bot.roast, "is_configured", lambda: True), \
                 patch.object(bot.roast, "roast", new=fake_roast), \
                 patch.object(bot.state_store, "get_profile_points", return_value=["knows guitar"]), \
+                patch.object(bot.state_store, "get_rules", return_value=["будь короче"]), \
+                patch.object(bot.state_store, "set_rules") as save_rules, \
                 patch.object(bot, "_update_profile_points", new=AsyncMock()) as fake_update:
             await bot._roast_draft(query, context, draft)
 
         # Stored profile points ride along as context; roast no longer triggers a profile refresh
         # (extraction happens once at message ingestion).
         self.assertEqual(captured_points, [["knows guitar"]])
+        # Behavior rules ride along too, and an answer without a delta saves nothing.
+        self.assertEqual(captured_rules, [["будь короче"]])
+        save_rules.assert_not_called()
         fake_update.assert_not_awaited()
         self.assertEqual(captured, [[{"role": "user", "content": "got nothing done today"}]])
         # Status message (id 1001) was edited into the answer.
@@ -1323,6 +1350,69 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
             {"role": "user", "content": "got nothing done today"},
             {"role": "assistant", "content": "Roast ready."},
         ])
+
+    async def _roast_with_delta(self, delta, stored_rules, save_rules):
+        fake_bot = FakeRoastBot()
+        query = SimpleNamespace(
+            message=SimpleNamespace(chat_id=123, message_id=20, get_bot=lambda: fake_bot, reply_text=AsyncMock()),
+        )
+        context = SimpleNamespace(bot=fake_bot, user_data={})
+
+        with patch.object(bot.roast, "is_configured", lambda: True), \
+                patch.object(bot.roast, "roast", new=AsyncMock(return_value=_roast_reply("Roast ready.", delta))), \
+                patch.object(bot.state_store, "get_profile_points", return_value=[]), \
+                patch.object(bot.state_store, "get_rules", return_value=stored_rules), \
+                patch.object(bot.state_store, "set_rules", save_rules), \
+                patch.object(bot, "_update_profile_points", new=AsyncMock()):
+            await bot._roast_draft(query, context, {"id": "e", "text": "entry", "chat_id": 123})
+        return fake_bot
+
+    async def test_rules_delta_in_a_reply_is_merged_saved_and_announced(self):
+        save_rules = MagicMock()
+        delta = {"add": ["не задавай вопросов"], "remove": ["будь мягче"]}
+
+        fake_bot = await self._roast_with_delta(delta, ["будь мягче", "пиши коротко"], save_rules)
+
+        save_rules.assert_called_once_with(["пиши коротко", "не задавай вопросов"])
+        note = fake_bot.sent[-1]["text"]
+        self.assertIn("🧠 Rules updated", note)
+        self.assertIn("+ не задавай вопросов", note)
+        self.assertIn("− будь мягче", note)
+        # The roast text itself stays clean of protocol chatter.
+        self.assertEqual(fake_bot.edits[-1]["text"], "Roast ready.")
+
+    async def test_reply_without_a_rules_delta_never_rewrites_the_list(self):
+        save_rules = MagicMock()
+
+        fake_bot = await self._roast_with_delta(None, ["пиши коротко"], save_rules)
+
+        save_rules.assert_not_called()
+        self.assertEqual(len(fake_bot.sent), 1)  # status message only, no note
+
+    async def test_no_op_delta_never_rewrites_the_list(self):
+        # An empty or fully redundant delta must not touch stored rules.
+        for delta in ({"add": [], "remove": [], "update": []}, {"add": ["пиши коротко"]}):
+            with self.subTest(delta=delta):
+                save_rules = MagicMock()
+                fake_bot = await self._roast_with_delta(delta, ["пиши коротко"], save_rules)
+                save_rules.assert_not_called()
+                self.assertEqual(len(fake_bot.sent), 1)
+
+    async def test_rules_note_keeps_the_conversation_replyable(self):
+        save_rules = MagicMock()
+
+        await self._roast_with_delta({"add": ["будь резче"]}, [], save_rules)
+
+        # Note is sent as message 1002 after the status edit (1001); replying to
+        # either continues the same chain.
+        self.assertEqual(bot._roast_chains["123:1002"], bot._roast_chains["123:1001"])
+
+    async def test_failure_to_save_rules_never_breaks_the_roast(self):
+        save_rules = MagicMock(side_effect=RuntimeError("disk on fire"))
+
+        fake_bot = await self._roast_with_delta({"add": ["будь резче"]}, [], save_rules)
+
+        self.assertEqual(fake_bot.edits[-1]["text"], "Roast ready.")
 
     async def test_roast_button_warns_when_not_configured(self):
         reply_text = AsyncMock()
@@ -1374,12 +1464,13 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
 
         captured = []
 
-        async def fake_roast(messages, points=None):
+        async def fake_roast(messages, points=None, rules=None):
             captured.append([dict(m) for m in messages])
-            return "answer to the question"
+            return _roast_reply("answer to the question")
 
         with patch.object(bot.roast, "roast", new=fake_roast), \
                 patch.object(bot.state_store, "get_profile_points", return_value=[]), \
+                patch.object(bot.state_store, "get_rules", return_value=[]), \
                 patch.object(bot, "handle_text", new=AsyncMock()) as fake_handle_text:
             await bot.receive_edit_reply(update, context)
 
@@ -1407,8 +1498,9 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         long_answer = "a" * (bot.TELEGRAM_MESSAGE_LIMIT + 500)
 
         with patch.object(bot.roast, "is_configured", lambda: True), \
-                patch.object(bot.roast, "roast", new=AsyncMock(return_value=long_answer)), \
+                patch.object(bot.roast, "roast", new=AsyncMock(return_value=_roast_reply(long_answer))), \
                 patch.object(bot.state_store, "get_profile_points", return_value=[]), \
+                patch.object(bot.state_store, "get_rules", return_value=[]), \
                 patch.object(bot, "_update_profile_points", new=AsyncMock()):
             await bot._roast_draft(query, context, draft)
 
@@ -1466,13 +1558,14 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
 
         captured = []
 
-        async def fake_roast(messages, points=None):
+        async def fake_roast(messages, points=None, rules=None):
             captured.append([dict(m) for m in messages])
-            return "answer to the spoken question"
+            return _roast_reply("answer to the spoken question")
 
         with patch.object(bot, "_transcribe_voice_file", new=AsyncMock(return_value="why is that?")) as fake_transcribe, \
                 patch.object(bot.roast, "roast", new=fake_roast), \
                 patch.object(bot.state_store, "get_profile_points", return_value=[]), \
+                patch.object(bot.state_store, "get_rules", return_value=[]), \
                 patch.object(bot.state_store, "record_voice") as record_voice:
             await bot.handle_voice(update, context)
 
