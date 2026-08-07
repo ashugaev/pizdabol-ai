@@ -68,6 +68,7 @@ services/
 ├── formatter.py        # Entry title/tags/text formatting
 ├── ai.py               # Chat client factory (OpenAI / Anthropic)
 ├── notion.py           # Notion API: create/read diary pages
+├── notion_memory.py    # Mirrors the bot's memory to Notion pages next to the database
 ├── summary.py          # Daily summary & weekly report
 ├── roast.py            # Roast mode + author profile
 ├── profile_rebuild.py  # Sequential profile rebuild over all notes (/memory)
