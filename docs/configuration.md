@@ -77,3 +77,16 @@ The bot works with the [Notion Journal](https://www.notion.com/help/guides/journ
 **Reliability:** saves are retried on transient Notion/network errors and verified by re-reading the created page before the draft is marked saved.
 
 **Source links:** private bot chats have no public message permalink, so `Source Message URL` uses a `https://t.me/<bot>?start=...` link — opening it makes the bot reply to the original message.
+
+### Memory pages
+
+Next to the database, inside the same parent page, the bot keeps two pages it creates on startup:
+
+| Page | Holds |
+|------|-------|
+| `Memory — Author profile` | The durable facts the bot knows about you |
+| `Memory — Bot rules` | The standing behavior rules you dictated to the bot |
+
+Both are mirrors: local state is the source of truth and each sync rewrites the page body as a bulleted list with an `Updated ... · N items` header. Editing a page in Notion does not change what the bot knows — the next sync overwrites it. A sync that would change nothing writes nothing.
+
+The parent is taken from the database itself, so there is nothing to configure; the database has to live inside a page rather than at the workspace root. Mirroring is best-effort — an unreachable Notion never blocks the diary flow.

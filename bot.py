@@ -24,7 +24,7 @@ from telegram.ext import (
 )
 
 from config import settings
-from services import profile_rebuild, roast
+from services import notion_memory, profile_rebuild, roast
 from services.diary_dates import diary_today
 from services.formatter import format_entry
 from services.notion import save_entry
@@ -679,6 +679,22 @@ async def _deliver_roast(reply_target, chain: list[dict], context, status_messag
     return sent_messages[-1]
 
 
+async def _mirror_author_memory() -> None:
+    """Best-effort: push the persisted author profile to its Notion page."""
+    try:
+        await notion_memory.sync_author_memory(state_store.get_profile_points())
+    except Exception:
+        logger.exception("Failed to mirror the author profile to Notion")
+
+
+async def _mirror_bot_memory() -> None:
+    """Best-effort: push the persisted behavior rules to their Notion page."""
+    try:
+        await notion_memory.sync_bot_memory(state_store.get_rules())
+    except Exception:
+        logger.exception("Failed to mirror the behavior rules to Notion")
+
+
 async def _update_profile_points(diary_text: str) -> None:
     """Best-effort: refresh the persisted author profile from a diary entry.
     Never blocks or breaks the roast flow — failures are logged and swallowed."""
@@ -688,6 +704,7 @@ async def _update_profile_points(diary_text: str) -> None:
         state_store.set_profile_points(points)
     except Exception:
         logger.exception("Failed to update roast profile points")
+    await _mirror_author_memory()
 
 
 async def _persist_rules_delta(reply_target, chain: list[dict], before: list[str], delta: dict | None) -> None:
@@ -707,6 +724,8 @@ async def _persist_rules_delta(reply_target, chain: list[dict], before: list[str
     note = await _reply_to_source(reply_target, "\n".join(lines))
     # Map the note to the chain too, so replying to it keeps the conversation.
     _store_roast_chain(_message_chat_id(note), note.message_id, chain)
+    # Last, so Notion latency never delays the note.
+    await _mirror_bot_memory()
 
 
 async def _run_roast(reply_target, chain: list[dict], context, status_message=None) -> None:
@@ -794,6 +813,10 @@ async def post_init(application: Application) -> None:
     await application.bot.set_my_commands(
         [BotCommand(name, description) for name, description in COMMANDS]
     )
+    try:
+        await notion_memory.ensure_memory_pages()
+    except Exception:
+        logger.exception("Failed to ensure the Notion memory pages exist")
     await replay_unprocessed_messages(application)
 
 
@@ -1687,6 +1710,9 @@ async def _run_memory_rebuild(
         with suppress(Exception):
             await _edit_reply_message(context, status_message, f"Memory rebuild failed: {e}")
         return
+
+    # One mirror write for the whole pass, not one per note.
+    await _mirror_author_memory()
 
     with suppress(Exception):
         await _edit_reply_message(

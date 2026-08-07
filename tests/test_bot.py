@@ -1020,23 +1020,43 @@ class MainRegistrationTests(unittest.TestCase):
 
 
 class PostInitTests(unittest.IsolatedAsyncioTestCase):
-    async def test_post_init_publishes_command_menu_then_replays(self):
+    def _application(self):
         bot_api = SimpleNamespace(published=None)
 
         async def set_my_commands(commands):
             bot_api.published = commands
 
         bot_api.set_my_commands = set_my_commands
-        application = SimpleNamespace(bot=bot_api)
+        return SimpleNamespace(bot=bot_api)
+
+    async def test_post_init_publishes_menu_ensures_memory_pages_then_replays(self):
+        application = self._application()
         replayed = []
 
-        with patch.object(bot, "replay_unprocessed_messages", new=AsyncMock(side_effect=replayed.append)):
+        with patch.object(bot.notion_memory, "ensure_memory_pages", new=AsyncMock()) as ensure, \
+                patch.object(bot, "replay_unprocessed_messages", new=AsyncMock(side_effect=replayed.append)):
             await bot.post_init(application)
 
         self.assertEqual(
-            [(command.command, command.description) for command in bot_api.published],
+            [(command.command, command.description) for command in application.bot.published],
             [(name, description) for name, description in bot.COMMANDS],
         )
+        ensure.assert_awaited_once_with()
+        self.assertEqual(replayed, [application])
+
+    async def test_post_init_still_replays_when_notion_is_unreachable(self):
+        application = self._application()
+        replayed = []
+
+        with patch.object(
+                    bot.notion_memory,
+                    "ensure_memory_pages",
+                    new=AsyncMock(side_effect=RuntimeError("notion down")),
+                ), \
+                patch.object(bot.logger, "exception"), \
+                patch.object(bot, "replay_unprocessed_messages", new=AsyncMock(side_effect=replayed.append)):
+            await bot.post_init(application)
+
         self.assertEqual(replayed, [application])
 
 
@@ -1363,6 +1383,7 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(bot.state_store, "get_profile_points", return_value=[]), \
                 patch.object(bot.state_store, "get_rules", return_value=stored_rules), \
                 patch.object(bot.state_store, "set_rules", save_rules), \
+                patch.object(bot.notion_memory, "sync_bot_memory", new=AsyncMock()) as self.mirror, \
                 patch.object(bot, "_update_profile_points", new=AsyncMock()):
             await bot._roast_draft(query, context, {"id": "e", "text": "entry", "chat_id": 123})
         return fake_bot
@@ -1374,6 +1395,8 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         fake_bot = await self._roast_with_delta(delta, ["будь мягче", "пиши коротко"], save_rules)
 
         save_rules.assert_called_once_with(["пиши коротко", "не задавай вопросов"])
+        # A saved change is mirrored to the Notion rules page.
+        self.mirror.assert_awaited_once()
         note = fake_bot.sent[-1]["text"]
         self.assertIn("🧠 Rules updated", note)
         self.assertIn("+ не задавай вопросов", note)
@@ -1387,6 +1410,7 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         fake_bot = await self._roast_with_delta(None, ["пиши коротко"], save_rules)
 
         save_rules.assert_not_called()
+        self.mirror.assert_not_awaited()
         self.assertEqual(len(fake_bot.sent), 1)  # status message only, no note
 
     async def test_no_op_delta_never_rewrites_the_list(self):
@@ -1425,22 +1449,48 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         reply_text.assert_awaited_once()
         self.assertIn("ANTHROPIC_API_KEY", reply_text.await_args.args[0])
 
-    async def test_update_profile_points_extracts_and_persists(self):
+    async def test_update_profile_points_extracts_persists_and_mirrors(self):
         with patch.object(bot.state_store, "get_profile_points", return_value=["old fact"]), \
                 patch.object(bot.roast, "extract_profile_points", new=AsyncMock(return_value=["fresh fact"])) as extract, \
+                patch.object(bot.notion_memory, "sync_author_memory", new=AsyncMock()) as mirror, \
                 patch.object(bot.state_store, "set_profile_points") as save:
             await bot._update_profile_points("today's entry")
 
         extract.assert_awaited_once_with("today's entry", ["old fact"])
         save.assert_called_once_with(["fresh fact"])
+        # The mirror reads back from state, so it always ships what was persisted.
+        mirror.assert_awaited_once()
 
     async def test_update_profile_points_swallows_failures(self):
         with patch.object(bot.state_store, "get_profile_points", return_value=[]), \
                 patch.object(bot.roast, "extract_profile_points", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+                patch.object(bot.notion_memory, "sync_author_memory", new=AsyncMock()), \
                 patch.object(bot.state_store, "set_profile_points") as save:
             await bot._update_profile_points("entry")
 
         save.assert_not_called()
+
+    async def test_mirror_author_memory_swallows_notion_failures(self):
+        with patch.object(bot.state_store, "get_profile_points", return_value=["fact"]), \
+                patch.object(
+                    bot.notion_memory,
+                    "sync_author_memory",
+                    new=AsyncMock(side_effect=RuntimeError("notion down")),
+                ) as mirror:
+            await bot._mirror_author_memory()
+
+        mirror.assert_awaited_once_with(["fact"])
+
+    async def test_mirror_bot_memory_swallows_notion_failures(self):
+        with patch.object(bot.state_store, "get_rules", return_value=["be blunt"]), \
+                patch.object(
+                    bot.notion_memory,
+                    "sync_bot_memory",
+                    new=AsyncMock(side_effect=RuntimeError("notion down")),
+                ) as mirror:
+            await bot._mirror_bot_memory()
+
+        mirror.assert_awaited_once_with(["be blunt"])
 
     async def test_reply_to_roast_message_continues_conversation(self):
         fake_bot = FakeRoastBot()
@@ -1928,6 +1978,7 @@ class MemoryRebuildRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def _run(self, fake_rebuild, before=None):
         with patch.object(bot.state_store, "get_profile_points", return_value=list(before or [])), \
                 patch.object(bot.state_store, "set_profile_points") as saved, \
+                patch.object(bot.notion_memory, "sync_author_memory", new=AsyncMock()) as self.mirror, \
                 patch.object(bot.profile_rebuild, "rebuild_profile", new=fake_rebuild):
             await bot._run_memory_rebuild(self.context, self.status_message, "work")
         return saved
@@ -1945,6 +1996,9 @@ class MemoryRebuildRunnerTests(unittest.IsolatedAsyncioTestCase):
         # Every note persists, so an abort or a restart never loses the pass.
         self.assertEqual(saved.call_count, 7)
         self.assertEqual(saved.call_args_list[3].args[0], ["old", "f", "f", "f"])
+
+        # Notion gets one write for the whole pass, not one per note.
+        self.mirror.assert_awaited_once()
 
         # Only every 5th note refreshes the message, plus the final result.
         progress_edits = [edit["text"] for edit in self.context.bot.edits[:-1]]
@@ -1995,6 +2049,8 @@ class MemoryRebuildRunnerTests(unittest.IsolatedAsyncioTestCase):
             await self._run(fake_rebuild)
 
         self.assertIn("Memory rebuild failed: notion down", self.context.bot.edits[-1]["text"])
+        # A pass that never ran has nothing to mirror.
+        self.mirror.assert_not_awaited()
 
     async def test_concurrent_pass_is_reported_without_a_traceback(self):
         fake_rebuild = AsyncMock(
