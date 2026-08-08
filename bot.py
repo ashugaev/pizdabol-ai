@@ -61,6 +61,13 @@ MEMORY_PROGRESS_EVERY = 5
 # How long a roast may reuse the last pull from the Notion memory pages.
 MEMORY_PULL_TTL_SECONDS = 60
 
+# One note covers everything the bot just learned: facts about the author and
+# rules it was taught. Both memories change on their own occasions, so a note
+# carries whichever blocks moved and is never sent empty.
+MEMORY_NOTE_HEADER = "🧠 Memory updated"
+PROFILE_BLOCK_LABEL = "About you"
+RULES_BLOCK_LABEL = "Rules"
+
 # Memory is read-modify-written from a roast, a background profile extraction and
 # startup, against both local state and Notion. One lock covers all of it, so
 # only one of them touches memory at a time. Never held across a model call.
@@ -752,9 +759,12 @@ async def _sync_memory() -> None:
         _last_memory_pull = monotonic()
 
 
-async def _update_profile_points(diary_text: str) -> None:
+async def _update_profile_points(diary_text: str, reply_target=None) -> None:
     """Best-effort: refresh the persisted author profile from a diary entry.
-    Never blocks or breaks the roast flow — failures are logged and swallowed."""
+    Never blocks or breaks the roast flow — failures are logged and swallowed.
+
+    `reply_target` is the message the note about the new facts replies to. An
+    entry that taught nothing sends nothing."""
     await _sync_author_memory()
     existing = state_store.get_profile_points()
     try:
@@ -771,6 +781,49 @@ async def _update_profile_points(diary_text: str) -> None:
             return
         state_store.set_profile_points(points)
         await _sync_author_memory_held()
+    if reply_target is None:
+        return
+    # Outside the lock: a Telegram send must never hold memory.
+    try:
+        await _send_memory_note(
+            reply_target, (PROFILE_BLOCK_LABEL, _memory_diff_lines(existing, points))
+        )
+    except Exception:
+        logger.exception("Failed to post the profile update note")
+
+
+def _memory_diff_lines(
+    before: list[memory.MemoryItem],
+    after: list[memory.MemoryItem],
+) -> list[str]:
+    """What changed in one memory list, by text: gained, then lost. A reworded
+    entry reads as both, which is the shortest honest way to show a rewrite."""
+    before_texts, after_texts = memory.texts(before), memory.texts(after)
+    lines = [f"+ {text}" for text in after_texts if text not in before_texts]
+    lines += [f"− {text}" for text in before_texts if text not in after_texts]
+    return lines
+
+
+def _render_memory_note(*blocks: tuple[str, list[str]]) -> str | None:
+    """One compact note out of the blocks that moved. A block with no lines is
+    dropped, and nothing moved at all means no note — the author is only ever
+    pinged about a real change."""
+    parts = [f"{label}:\n" + "\n".join(lines) for label, lines in blocks if lines]
+    if not parts:
+        return None
+    return "\n".join([MEMORY_NOTE_HEADER, *parts])
+
+
+async def _send_memory_note(reply_target, *blocks: tuple[str, list[str]]) -> list:
+    """Post the note, if there is one. A dense extraction can outgrow one
+    Telegram message, so it is chunked like a roast. Returns what was sent."""
+    text = _render_memory_note(*blocks)
+    if not text:
+        return []
+    sent = []
+    for chunk in _split_message(text):
+        sent.append(await _reply_to_source(sent[-1] if sent else reply_target, chunk))
+    return sent
 
 
 async def _persist_rules_ops(
@@ -789,13 +842,12 @@ async def _persist_rules_ops(
     if after == before:
         return
     state_store.set_rules(after)
-    before_texts, after_texts = memory.texts(before), memory.texts(after)
-    lines = ["🧠 Rules updated"]
-    lines += [f"+ {rule}" for rule in after_texts if rule not in before_texts]
-    lines += [f"− {rule}" for rule in before_texts if rule not in after_texts]
-    note = await _reply_to_source(reply_target, "\n".join(lines))
+    notes = await _send_memory_note(
+        reply_target, (RULES_BLOCK_LABEL, _memory_diff_lines(before, after))
+    )
     # Map the note to the chain too, so replying to it keeps the conversation.
-    _store_roast_chain(_message_chat_id(note), note.message_id, chain)
+    for note in notes:
+        _store_roast_chain(_message_chat_id(note), note.message_id, chain)
     # Last, so Notion latency never delays the note.
     await _sync_bot_memory()
 
@@ -1223,7 +1275,7 @@ async def _create_preview(
     if message_key:
         state_store.mark_message_drafted(message_key, entry_id)
     if source_text and source_text.strip():
-        context.application.create_task(_update_profile_points(source_text))
+        context.application.create_task(_update_profile_points(source_text, preview_msg))
 
 
 def _callback_payload(update: Update) -> tuple[str, str] | tuple[None, None]:

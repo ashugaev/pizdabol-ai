@@ -487,7 +487,8 @@ class CreatePreviewTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(len(fake_context.application.created_tasks), 1)
-        fake_update.assert_called_once_with("plain text")
+        # The preview message carries the note about whatever the entry taught.
+        fake_update.assert_called_once_with("plain text", processing_message)
 
 
 class DuplicateVoiceFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -1265,6 +1266,40 @@ class FakeRoastBot:
         )
 
 
+class MemoryNoteTests(unittest.TestCase):
+    def test_note_carries_both_blocks(self):
+        note = bot._render_memory_note(
+            (bot.PROFILE_BLOCK_LABEL, ["+ играет в пинг-понг"]),
+            (bot.RULES_BLOCK_LABEL, ["+ пиши коротко", "− будь мягче"]),
+        )
+        self.assertEqual(note, (
+            "🧠 Memory updated\n"
+            "About you:\n+ играет в пинг-понг\n"
+            "Rules:\n+ пиши коротко\n− будь мягче"
+        ))
+
+    def test_empty_block_is_dropped(self):
+        note = bot._render_memory_note(
+            (bot.PROFILE_BLOCK_LABEL, []),
+            (bot.RULES_BLOCK_LABEL, ["+ пиши коротко"]),
+        )
+        self.assertEqual(note, "🧠 Memory updated\nRules:\n+ пиши коротко")
+
+    def test_nothing_changed_means_no_note(self):
+        self.assertIsNone(
+            bot._render_memory_note(
+                (bot.PROFILE_BLOCK_LABEL, []), (bot.RULES_BLOCK_LABEL, [])
+            )
+        )
+
+    def test_diff_lines_read_a_rewrite_as_gained_and_lost(self):
+        lines = bot._memory_diff_lines(
+            _items("любит кофе", "живёт в Лиссабоне"),
+            _items("живёт в Паттайе", "любит кофе"),
+        )
+        self.assertEqual(lines, ["+ живёт в Паттайе", "− живёт в Лиссабоне"])
+
+
 class SplitMessageTests(unittest.TestCase):
     def test_short_text_is_a_single_chunk(self):
         self.assertEqual(bot._split_message("short"), ["short"])
@@ -1416,9 +1451,10 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         # A saved change is mirrored to the Notion rules page.
         self.mirror.assert_awaited_once()
         note = fake_bot.sent[-1]["text"]
-        self.assertIn("🧠 Rules updated", note)
-        self.assertIn("+ не задавай вопросов", note)
-        self.assertIn("− будь мягче", note)
+        self.assertEqual(
+            note,
+            "🧠 Memory updated\nRules:\n+ не задавай вопросов\n− будь мягче",
+        )
         # The roast text itself stays clean of protocol chatter.
         self.assertEqual(fake_bot.edits[-1]["text"], "Roast ready.")
 
@@ -1500,6 +1536,33 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
 
         save.assert_not_called()
         push.assert_not_awaited()
+
+    async def _extract_with_note(self, before, after):
+        fake_bot = FakeRoastBot()
+        target = SimpleNamespace(chat_id=123, message_id=20, get_bot=lambda: fake_bot)
+
+        with patch.object(bot.state_store, "get_profile_points", return_value=before), \
+                patch.object(bot.roast, "extract_profile_points", new=AsyncMock(return_value=after)), \
+                patch.object(bot, "_sync_author_memory", new=AsyncMock()), \
+                patch.object(bot, "_sync_author_memory_held", new=AsyncMock()), \
+                patch.object(bot.state_store, "set_profile_points"):
+            await bot._update_profile_points("today's entry", target)
+        return fake_bot
+
+    async def test_new_facts_are_announced(self):
+        fake_bot = await self._extract_with_note(
+            _items("любит кофе"), _items("любит кофе", "играет в пинг-понг")
+        )
+
+        self.assertEqual(
+            fake_bot.sent[-1]["text"],
+            "🧠 Memory updated\nAbout you:\n+ играет в пинг-понг",
+        )
+
+    async def test_an_entry_that_taught_nothing_sends_nothing(self):
+        fake_bot = await self._extract_with_note(_items("любит кофе"), _items("любит кофе"))
+
+        self.assertEqual(fake_bot.sent, [])
 
     async def test_update_profile_points_swallows_failures(self):
         with patch.object(bot.state_store, "get_profile_points", return_value=[]), \

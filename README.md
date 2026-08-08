@@ -20,7 +20,7 @@ You'll need a Telegram bot token, an OpenAI API key, and a Notion integration + 
 - **Send a voice or text note** — it's transcribed, titled, tagged, previewed, and saved as a Notion row.
 - **Edit before saving** — adjust title, text, tags, or date, or reformat the text; nothing is written until you press Save.
 - **🔥 Roast, your personal coach** — an honest take on your entry; reply to it to keep talking and go deeper. Tell it to behave differently and it remembers.
-- **Learns you on its own** — builds a private knowledge base about you from every note, no extra input needed.
+- **Learns you on its own** — builds a private knowledge base about you from every note, no extra input needed, and posts one short note when it learns something or you change a rule.
 - **Summaries** — automatic daily recap and an on-demand weekly report.
 - **Memory in Notion** — the knowledge base and the behavior rules you gave it live on their own pages next to your diary database. Edit a page by hand and the bot adopts your version.
 
