@@ -51,11 +51,17 @@ class FakeNotionHttp:
     def __init__(self, database_parent: dict | None = None, children: dict | None = None):
         self.database_parent = database_parent or {"type": "page_id", "page_id": PARENT_PAGE_ID}
         self.children = children or {}
+        self.get_calls = []
         self.post_calls = []
         self.patch_calls = []
         self.delete_calls = []
+        self.fail_next_get: Exception | None = None
 
     async def get(self, url, headers):
+        self.get_calls.append(url)
+        if self.fail_next_get:
+            self.fail_next_get, error = None, self.fail_next_get
+            raise error
         if "/databases/" in url:
             return FakeResponse({"parent": self.database_parent})
         block_id = url.split("/blocks/")[1].split("/children")[0]
@@ -129,19 +135,27 @@ class MemoryParentTests(unittest.IsolatedAsyncioTestCase):
 
 
 class SyncMemoryPageTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        notion_memory.forget_page_ids()
+
     def _http(self, page_children: list[dict], title: str = "Memory — Author profile"):
         return FakeNotionHttp(children={
             PARENT_PAGE_ID: [_child_page(AUTHOR_PAGE_ID, title)],
             AUTHOR_PAGE_ID: page_children,
         })
 
-    async def _sync(self, http, items, title="Memory — Author profile"):
-        return await notion_memory._sync_memory_page(http, title, items, "facts")
+    async def _sync(self, http, items, mirror=None, title="Memory — Author profile"):
+        """Syncs with a mirror that matches the page by default, i.e. no hand edit."""
+        if mirror is None:
+            mirror = notion_memory._listed_items(http.children.get(AUTHOR_PAGE_ID, []))
+        return await notion_memory._sync_memory_page(http, title, items, "facts", mirror)
 
     async def test_unchanged_memory_is_not_rewritten(self):
         http = self._http([_header_block(), _bullet("kept fact")])
 
-        self.assertFalse(await self._sync(http, ["kept fact"]))
+        result = await self._sync(http, ["kept fact"])
+
+        self.assertEqual(result, notion_memory.MemorySync(["kept fact"], False))
         self.assertEqual(http.delete_calls, [])
         self.assertEqual(http.patch_calls, [])
         self.assertEqual(http.post_calls, [])
@@ -149,7 +163,9 @@ class SyncMemoryPageTests(unittest.IsolatedAsyncioTestCase):
     async def test_changed_memory_replaces_the_whole_body(self):
         http = self._http([_header_block(), _bullet("stale fact")])
 
-        self.assertTrue(await self._sync(http, ["fresh fact", "another fact"]))
+        result = await self._sync(http, ["fresh fact", "another fact"])
+
+        self.assertEqual(result, notion_memory.MemorySync(["fresh fact", "another fact"], False))
         self.assertEqual(http.delete_calls, [
             f"{notion_memory.API}/blocks/block-header",
             f"{notion_memory.API}/blocks/block-stale fact",
@@ -167,7 +183,8 @@ class SyncMemoryPageTests(unittest.IsolatedAsyncioTestCase):
     async def test_emptied_memory_leaves_a_header_only_page(self):
         http = self._http([_header_block(), _bullet("gone")])
 
-        self.assertTrue(await self._sync(http, []))
+        await self._sync(http, [])
+
         self.assertEqual(_bullets_written(http.patch_calls), [])
         self.assertEqual([block["type"] for block in http.patch_calls[0]["json"]["children"]],
                          ["paragraph"])
@@ -176,14 +193,16 @@ class SyncMemoryPageTests(unittest.IsolatedAsyncioTestCase):
         items = [f"fact {index}" for index in range(150)]
         http = self._http([])
 
-        self.assertTrue(await self._sync(http, items))
+        await self._sync(http, items)
+
         self.assertEqual([len(call["json"]["children"]) for call in http.patch_calls], [100, 51])
         self.assertEqual(_bullets_written(http.patch_calls), items)
 
     async def test_missing_page_is_created_next_to_the_database(self):
         http = FakeNotionHttp(children={PARENT_PAGE_ID: [_child_page("db-block", "Diary")]})
 
-        self.assertTrue(await self._sync(http, ["first fact"]))
+        await self._sync(http, ["first fact"], mirror=[])
+
         self.assertEqual(len(http.post_calls), 1)
         created = http.post_calls[0]
         self.assertEqual(created["url"], f"{notion_memory.API}/pages")
@@ -197,7 +216,91 @@ class SyncMemoryPageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_bullets_written(http.patch_calls), ["first fact"])
 
 
+class HandEditedPageTests(unittest.IsolatedAsyncioTestCase):
+    """A page that no longer lists what the bot last wrote was edited by hand,
+    and then Notion — not local state — is the source of truth."""
+
+    def setUp(self):
+        notion_memory.forget_page_ids()
+
+    def _http(self, page_children: list[dict]):
+        return FakeNotionHttp(children={
+            PARENT_PAGE_ID: [_child_page(AUTHOR_PAGE_ID, "Memory — Author profile")],
+            AUTHOR_PAGE_ID: page_children,
+        })
+
+    async def _sync(self, http, items, mirror):
+        return await notion_memory._sync_memory_page(
+            http, "Memory — Author profile", items, "facts", mirror,
+        )
+
+    async def test_hand_edited_page_wins_over_local_state(self):
+        http = self._http([_header_block(), _bullet("typed by hand")])
+
+        result = await self._sync(http, ["stored fact"], mirror=["mirrored fact"])
+
+        self.assertEqual(result, notion_memory.MemorySync(["typed by hand"], True))
+        # Adopting reads only — the page the author typed is left exactly as is.
+        self.assertEqual(http.delete_calls, [])
+        self.assertEqual(http.patch_calls, [])
+
+    async def test_page_emptied_by_hand_wipes_the_memory(self):
+        http = self._http([_header_block()])
+
+        result = await self._sync(http, ["stored fact"], mirror=["stored fact"])
+
+        self.assertEqual(result, notion_memory.MemorySync([], True))
+
+    async def test_stale_page_is_rewritten_when_it_still_matches_the_mirror(self):
+        # A failed earlier write leaves the page behind local state, which must
+        # not be mistaken for a hand edit.
+        http = self._http([_header_block(), _bullet("old fact")])
+
+        result = await self._sync(http, ["old fact", "new fact"], mirror=["old fact"])
+
+        self.assertEqual(result, notion_memory.MemorySync(["old fact", "new fact"], False))
+        self.assertEqual(_bullets_written(http.patch_calls), ["old fact", "new fact"])
+
+
+class PageIdCacheTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        notion_memory.forget_page_ids()
+
+    def _http(self):
+        return FakeNotionHttp(children={
+            PARENT_PAGE_ID: [_child_page(AUTHOR_PAGE_ID, "Memory — Author profile")],
+            AUTHOR_PAGE_ID: [_header_block(), _bullet("kept fact")],
+        })
+
+    async def _sync(self, http):
+        return await notion_memory._sync_memory_page(
+            http, "Memory — Author profile", ["kept fact"], "facts", ["kept fact"],
+        )
+
+    async def test_the_page_is_resolved_once_per_process(self):
+        http = self._http()
+
+        await self._sync(http)
+        await self._sync(http)
+
+        # Second sync reads the page body only: no database and no parent lookup.
+        self.assertEqual(http.get_calls.count(f"{notion_memory.API}/databases/test-notion-db"), 1)
+
+    async def test_a_failing_sync_drops_the_cached_id(self):
+        http = self._http()
+        await self._sync(http)
+
+        http.fail_next_get = RuntimeError("page deleted")
+        with self.assertRaises(RuntimeError):
+            await self._sync(http)
+
+        self.assertEqual(notion_memory._page_ids, {})
+
+
 class EnsureMemoryPagesTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        notion_memory.forget_page_ids()
+
     async def _ensure(self, http) -> list[str]:
         class FakeClient:
             def __init__(self, timeout=None):

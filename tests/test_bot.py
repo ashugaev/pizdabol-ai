@@ -1352,9 +1352,13 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(bot.state_store, "get_profile_points", return_value=["knows guitar"]), \
                 patch.object(bot.state_store, "get_rules", return_value=["будь короче"]), \
                 patch.object(bot.state_store, "set_rules") as save_rules, \
+                patch.object(bot, "_sync_memory", new=AsyncMock()) as pulled, \
                 patch.object(bot, "_update_profile_points", new=AsyncMock()) as fake_update:
             await bot._roast_draft(query, context, draft)
 
+        # Memory is pulled from Notion before it is read, so a hand-edited page
+        # steers the very next roast.
+        pulled.assert_awaited_once()
         # Stored profile points ride along as context; roast no longer triggers a profile refresh
         # (extraction happens once at message ingestion).
         self.assertEqual(captured_points, [["knows guitar"]])
@@ -1383,7 +1387,8 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(bot.state_store, "get_profile_points", return_value=[]), \
                 patch.object(bot.state_store, "get_rules", return_value=stored_rules), \
                 patch.object(bot.state_store, "set_rules", save_rules), \
-                patch.object(bot.notion_memory, "sync_bot_memory", new=AsyncMock()) as self.mirror, \
+                patch.object(bot, "_sync_memory", new=AsyncMock()), \
+                patch.object(bot, "_sync_bot_memory", new=AsyncMock()) as self.mirror, \
                 patch.object(bot, "_update_profile_points", new=AsyncMock()):
             await bot._roast_draft(query, context, {"id": "e", "text": "entry", "chat_id": 123})
         return fake_bot
@@ -1452,45 +1457,25 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_update_profile_points_extracts_persists_and_mirrors(self):
         with patch.object(bot.state_store, "get_profile_points", return_value=["old fact"]), \
                 patch.object(bot.roast, "extract_profile_points", new=AsyncMock(return_value=["fresh fact"])) as extract, \
-                patch.object(bot.notion_memory, "sync_author_memory", new=AsyncMock()) as mirror, \
+                patch.object(bot, "_sync_author_memory", new=AsyncMock()) as sync, \
                 patch.object(bot.state_store, "set_profile_points") as save:
             await bot._update_profile_points("today's entry")
 
         extract.assert_awaited_once_with("today's entry", ["old fact"])
         save.assert_called_once_with(["fresh fact"])
-        # The mirror reads back from state, so it always ships what was persisted.
-        mirror.assert_awaited_once()
+        # Pull hand edits before extracting, push the merged profile after.
+        self.assertEqual(sync.await_count, 2)
 
     async def test_update_profile_points_swallows_failures(self):
         with patch.object(bot.state_store, "get_profile_points", return_value=[]), \
                 patch.object(bot.roast, "extract_profile_points", new=AsyncMock(side_effect=RuntimeError("boom"))), \
-                patch.object(bot.notion_memory, "sync_author_memory", new=AsyncMock()), \
+                patch.object(bot, "_sync_author_memory", new=AsyncMock()), \
                 patch.object(bot.state_store, "set_profile_points") as save:
             await bot._update_profile_points("entry")
 
         save.assert_not_called()
 
-    async def test_mirror_author_memory_swallows_notion_failures(self):
-        with patch.object(bot.state_store, "get_profile_points", return_value=["fact"]), \
-                patch.object(
-                    bot.notion_memory,
-                    "sync_author_memory",
-                    new=AsyncMock(side_effect=RuntimeError("notion down")),
-                ) as mirror:
-            await bot._mirror_author_memory()
 
-        mirror.assert_awaited_once_with(["fact"])
-
-    async def test_mirror_bot_memory_swallows_notion_failures(self):
-        with patch.object(bot.state_store, "get_rules", return_value=["be blunt"]), \
-                patch.object(
-                    bot.notion_memory,
-                    "sync_bot_memory",
-                    new=AsyncMock(side_effect=RuntimeError("notion down")),
-                ) as mirror:
-            await bot._mirror_bot_memory()
-
-        mirror.assert_awaited_once_with(["be blunt"])
 
     async def test_reply_to_roast_message_continues_conversation(self):
         fake_bot = FakeRoastBot()
@@ -1978,7 +1963,7 @@ class MemoryRebuildRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def _run(self, fake_rebuild, before=None):
         with patch.object(bot.state_store, "get_profile_points", return_value=list(before or [])), \
                 patch.object(bot.state_store, "set_profile_points") as saved, \
-                patch.object(bot.notion_memory, "sync_author_memory", new=AsyncMock()) as self.mirror, \
+                patch.object(bot, "_sync_author_memory", new=AsyncMock()) as self.mirror, \
                 patch.object(bot.profile_rebuild, "rebuild_profile", new=fake_rebuild):
             await bot._run_memory_rebuild(self.context, self.status_message, "work")
         return saved
@@ -1997,8 +1982,8 @@ class MemoryRebuildRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.call_count, 7)
         self.assertEqual(saved.call_args_list[3].args[0], ["old", "f", "f", "f"])
 
-        # Notion gets one write for the whole pass, not one per note.
-        self.mirror.assert_awaited_once()
+        # One pull before the pass and one write after it, not one per note.
+        self.assertEqual(self.mirror.await_count, 2)
 
         # Only every 5th note refreshes the message, plus the final result.
         progress_edits = [edit["text"] for edit in self.context.bot.edits[:-1]]
@@ -2049,8 +2034,8 @@ class MemoryRebuildRunnerTests(unittest.IsolatedAsyncioTestCase):
             await self._run(fake_rebuild)
 
         self.assertIn("Memory rebuild failed: notion down", self.context.bot.edits[-1]["text"])
-        # A pass that never ran has nothing to mirror.
-        self.mirror.assert_not_awaited()
+        # Only the pull before the pass: a pass that never ran has nothing to write.
+        self.assertEqual(self.mirror.await_count, 1)
 
     async def test_concurrent_pass_is_reported_without_a_traceback(self):
         fake_rebuild = AsyncMock(
@@ -2060,3 +2045,86 @@ class MemoryRebuildRunnerTests(unittest.IsolatedAsyncioTestCase):
         await self._run(fake_rebuild)
 
         self.assertIn("already running", self.context.bot.edits[-1]["text"])
+
+
+class MemorySyncTests(unittest.IsolatedAsyncioTestCase):
+    """Local state and the Notion memory pages, kept together in both directions."""
+
+    def _sync(self, adopted: bool, items: list[str], failure: Exception | None = None):
+        return AsyncMock(
+            side_effect=failure,
+            return_value=bot.notion_memory.MemorySync(items, adopted),
+        )
+
+    async def test_author_profile_edited_in_notion_replaces_local_state(self):
+        sync = self._sync(adopted=True, items=["typed by hand"])
+        with patch.object(bot.state_store, "get_profile_points", return_value=["stored fact"]), \
+                patch.object(bot.state_store, "get_notion_mirror", return_value=["stored fact"]), \
+                patch.object(bot.notion_memory, "sync_author_memory", new=sync), \
+                patch.object(bot.state_store, "set_profile_points") as save, \
+                patch.object(bot.state_store, "set_notion_mirror") as remember:
+            await bot._sync_author_memory()
+
+        sync.assert_awaited_once_with(["stored fact"], ["stored fact"])
+        save.assert_called_once_with(["typed by hand"])
+        remember.assert_called_once_with(bot.PROFILE_SECTION, ["typed by hand"])
+
+    async def test_rules_edited_in_notion_replace_local_state(self):
+        sync = self._sync(adopted=True, items=["typed by hand"])
+        with patch.object(bot.state_store, "get_rules", return_value=["stored rule"]), \
+                patch.object(bot.state_store, "get_notion_mirror", return_value=["stored rule"]), \
+                patch.object(bot.notion_memory, "sync_bot_memory", new=sync), \
+                patch.object(bot.state_store, "set_rules") as save, \
+                patch.object(bot.state_store, "set_notion_mirror") as remember:
+            await bot._sync_bot_memory()
+
+        save.assert_called_once_with(["typed by hand"])
+        remember.assert_called_once_with(bot.RULES_SECTION, ["typed by hand"])
+
+    async def test_an_untouched_page_leaves_local_state_alone(self):
+        sync = self._sync(adopted=False, items=["stored rule"])
+        with patch.object(bot.state_store, "get_rules", return_value=["stored rule"]), \
+                patch.object(bot.state_store, "get_notion_mirror", return_value=[]), \
+                patch.object(bot.notion_memory, "sync_bot_memory", new=sync), \
+                patch.object(bot.state_store, "set_rules") as save, \
+                patch.object(bot.state_store, "set_notion_mirror") as remember:
+            await bot._sync_bot_memory()
+
+        save.assert_not_called()
+        # The mirror still moves: the page is now known to list these rules.
+        remember.assert_called_once_with(bot.RULES_SECTION, ["stored rule"])
+
+    async def test_a_failing_sync_is_swallowed_and_changes_nothing(self):
+        sync = self._sync(adopted=True, items=["x"], failure=RuntimeError("notion down"))
+        with patch.object(bot.state_store, "get_profile_points", return_value=["fact"]), \
+                patch.object(bot.state_store, "get_notion_mirror", return_value=["fact"]), \
+                patch.object(bot.notion_memory, "sync_author_memory", new=sync), \
+                patch.object(bot.state_store, "set_profile_points") as save, \
+                patch.object(bot.state_store, "set_notion_mirror") as remember:
+            await bot._sync_author_memory()
+
+        save.assert_not_called()
+        remember.assert_not_called()
+
+    async def test_rules_command_pulls_hand_edits_before_printing(self):
+        message = SimpleNamespace(reply_text=AsyncMock())
+        update = SimpleNamespace(effective_message=message)
+
+        with patch.object(bot, "_sync_bot_memory", new=AsyncMock()) as sync, \
+                patch.object(bot.state_store, "get_rules", return_value=["typed by hand"]):
+            await bot.handle_rules(update, SimpleNamespace())
+
+        sync.assert_awaited_once()
+        self.assertIn("typed by hand", message.reply_text.await_args.args[0])
+
+    async def test_startup_pulls_both_pages(self):
+        application = SimpleNamespace(bot=SimpleNamespace(set_my_commands=AsyncMock()))
+
+        with patch.object(bot.notion_memory, "ensure_memory_pages", new=AsyncMock()), \
+                patch.object(bot, "_sync_author_memory", new=AsyncMock()) as author, \
+                patch.object(bot, "_sync_bot_memory", new=AsyncMock()) as rules, \
+                patch.object(bot, "replay_unprocessed_messages", new=AsyncMock()):
+            await bot.post_init(application)
+
+        author.assert_awaited_once()
+        rules.assert_awaited_once()

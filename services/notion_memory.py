@@ -1,4 +1,4 @@
-"""Mirror of the bot's long-term memory into Notion.
+"""Two-way sync of the bot's long-term memory with Notion.
 
 Two pages sit next to the diary database, inside the same parent page, so the
 memory is readable and editable in the same place as the notes:
@@ -6,16 +6,21 @@ memory is readable and editable in the same place as the notes:
   "Memory — Author profile"  durable facts about the author
   "Memory — Bot rules"       standing behavior rules the author dictated
 
-Notion is a mirror, never a source of truth: the bot reads memory from local
-state and every sync rewrites the page body from it. A sync is a no-op when the
-page already lists exactly the same items, so a diary message that changes
-nothing costs one read.
+A page edited by hand is the source of truth: the author owns their memory, and
+what they typed into Notion outranks what the bot stored. The caller passes the
+list it last saw on the page (the mirror) alongside the local list, which is what
+separates a manual edit from the bot's own last write:
 
-Best-effort by contract — callers swallow failures. A broken mirror must never
+  page == local            nothing to do
+  page != mirror           the page was edited by hand — adopt it
+  page == mirror           the page is stale — rewrite it from local
+
+Best-effort by contract — callers swallow failures. A broken sync must never
 break the diary flow.
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import httpx
@@ -34,6 +39,19 @@ AUTHOR_MEMORY_PAGE_TITLE = "Memory — Author profile"
 BOT_MEMORY_PAGE_TITLE = "Memory — Bot rules"
 # Notion rejects a children payload longer than this.
 NOTION_CHILDREN_CHUNK_SIZE = 100
+
+# Resolving a page id costs two requests, and syncing now runs before every read
+# of memory, so ids are cached for the process and dropped on any failure.
+_page_ids: dict[str, str] = {}
+
+
+@dataclass(frozen=True)
+class MemorySync:
+    """Outcome of one sync: the list both sides now hold, and whether it came
+    from a hand-edited page instead of local state."""
+
+    items: list[str]
+    adopted: bool
 
 
 def _header_line(count: int, label: str) -> str:
@@ -144,22 +162,47 @@ async def _replace_page_body(
         )
 
 
+def forget_page_ids() -> None:
+    """Drops every cached page id, so the next sync resolves them again."""
+    _page_ids.clear()
+
+
+async def _memory_page_id(http: httpx.AsyncClient, title: str, label: str) -> str:
+    cached = _page_ids.get(title)
+    if cached:
+        return cached
+    parent_page_id = await _memory_parent_page_id(http)
+    page_id = await _find_or_create_memory_page(http, parent_page_id, title, label)
+    _page_ids[title] = page_id
+    return page_id
+
+
 async def _sync_memory_page(
     http: httpx.AsyncClient,
     title: str,
     items: list[str],
     label: str,
-) -> bool:
-    """Rewrites the page so it lists exactly `items`. Returns whether it wrote."""
-    parent_page_id = await _memory_parent_page_id(http)
-    page_id = await _find_or_create_memory_page(http, parent_page_id, title, label)
-    existing = await _page_children(http, page_id)
-    if _listed_items(existing) == items:
-        return False
+    mirror: list[str],
+) -> MemorySync:
+    """Brings the page and `items` back together, hand edits winning."""
+    try:
+        page_id = await _memory_page_id(http, title, label)
+        existing = await _page_children(http, page_id)
+        remote = _listed_items(existing)
+        if remote == items:
+            return MemorySync(items, False)
+        if remote != mirror:
+            logger.info('Adopted %d item(s) edited by hand on "%s"', len(remote), title)
+            return MemorySync(remote, True)
 
-    await _replace_page_body(http, page_id, _memory_blocks(items, label), existing)
-    logger.info('Synced %d item(s) to Notion memory page "%s"', len(items), title)
-    return True
+        await _replace_page_body(http, page_id, _memory_blocks(items, label), existing)
+        logger.info('Synced %d item(s) to Notion memory page "%s"', len(items), title)
+        return MemorySync(items, False)
+    except Exception:
+        # A page deleted or renamed under us must be resolved again, not retried
+        # forever against a dead id.
+        _page_ids.pop(title, None)
+        raise
 
 
 MEMORY_PAGES = (
@@ -170,23 +213,19 @@ MEMORY_PAGES = (
 
 async def ensure_memory_pages() -> list[str]:
     """Creates any missing memory page, leaving the content of existing ones
-    alone. Run at startup so both pages are in Notion before the first write."""
+    alone. Run at startup so both pages are in Notion before the first sync."""
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        parent_page_id = await _memory_parent_page_id(http)
-        return [
-            await _find_or_create_memory_page(http, parent_page_id, title, label)
-            for title, label in MEMORY_PAGES
-        ]
+        return [await _memory_page_id(http, title, label) for title, label in MEMORY_PAGES]
 
 
-async def sync_author_memory(points: list[str]) -> bool:
-    """Mirrors the author profile — the facts the bot knows about the author."""
+async def sync_author_memory(points: list[str], mirror: list[str]) -> MemorySync:
+    """Syncs the author profile — the facts the bot knows about the author."""
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        return await _sync_memory_page(http, AUTHOR_MEMORY_PAGE_TITLE, points, "facts")
+        return await _sync_memory_page(http, AUTHOR_MEMORY_PAGE_TITLE, points, "facts", mirror)
 
 
-async def sync_bot_memory(rules: list[str]) -> bool:
-    """Mirrors the bot's own memory — the standing behavior rules the author
+async def sync_bot_memory(rules: list[str], mirror: list[str]) -> MemorySync:
+    """Syncs the bot's own memory — the standing behavior rules the author
     dictated. Wired by whoever owns those rules in local state."""
     async with httpx.AsyncClient(timeout=NOTION_TIMEOUT) as http:
-        return await _sync_memory_page(http, BOT_MEMORY_PAGE_TITLE, rules, "rules")
+        return await _sync_memory_page(http, BOT_MEMORY_PAGE_TITLE, rules, "rules", mirror)

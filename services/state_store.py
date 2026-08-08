@@ -8,6 +8,9 @@ from typing import Any
 
 STATE_PATH = Path(os.getenv("BOT_STATE_PATH", ".data/message_state.json"))
 MAX_RETAINED_MESSAGES = 200
+# State sections mirrored to a Notion memory page.
+PROFILE_SECTION = "profile"
+RULES_SECTION = "rules"
 UNPROCESSED_STATUSES = {"received", "processing", "failed"}
 VOICE_DUPLICATE_STATUSES = {"drafted", "saved"}
 
@@ -27,8 +30,8 @@ class StateStore:
                 "version": 1,
                 "messages": {},
                 "drafts": {},
-                "profile": {"points": []},
-                "rules": {"items": []},
+                "profile": {"points": [], "notion_mirror": []},
+                "rules": {"items": [], "notion_mirror": []},
             }
         with self.path.open("r", encoding="utf-8") as f:
             data = json.load(f)
@@ -37,8 +40,10 @@ class StateStore:
         data.setdefault("drafts", {})
         data.setdefault("profile", {})
         data["profile"].setdefault("points", [])
+        data["profile"].setdefault("notion_mirror", [])
         data.setdefault("rules", {})
         data["rules"].setdefault("items", [])
+        data["rules"].setdefault("notion_mirror", [])
         return data
 
     def _save(self) -> None:
@@ -227,6 +232,7 @@ class StateStore:
         cleaned = [point.strip() for point in points if isinstance(point, str) and point.strip()]
         self.data["profile"] = {
             "points": cleaned,
+            "notion_mirror": self.data["profile"].get("notion_mirror", []),
             "updated_at": _now(),
         }
         self._save()
@@ -241,8 +247,22 @@ class StateStore:
         cleaned = [rule.strip() for rule in rules if isinstance(rule, str) and rule.strip()]
         self.data["rules"] = {
             "items": cleaned,
+            "notion_mirror": self.data["rules"].get("notion_mirror", []),
             "updated_at": _now(),
         }
+        self._save()
+
+    def get_notion_mirror(self, section: str) -> list[str]:
+        """What the section's Notion page listed at the last successful sync.
+
+        A page that no longer lists exactly this was edited by hand, which is how
+        the bot tells a manual Notion edit from its own last write."""
+        return list(self.data[section].get("notion_mirror", []))
+
+    def set_notion_mirror(self, section: str, items: list[str]) -> None:
+        if self.data[section].get("notion_mirror") == items:
+            return
+        self.data[section]["notion_mirror"] = list(items)
         self._save()
 
     def save_draft(self, draft: dict[str, Any]) -> None:

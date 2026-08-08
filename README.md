@@ -21,7 +21,7 @@ You'll need a Telegram bot token, an OpenAI API key, and a Notion integration + 
 - **Edit before saving** — adjust title, text, tags, or date, or reformat the text; nothing is written until you press Save.
 - **🔥 Roast** — get an honest take on your entry, with follow-up chat; tell it to behave differently and it remembers.
 - **Summaries** — automatic daily recap and an on-demand weekly report.
-- **Memory in Notion** — what the bot knows about you, and the rules you gave it, live on their own pages next to your diary database.
+- **Memory in Notion** — what the bot knows about you, and the rules you gave it, live on their own pages next to your diary database. Edit a page by hand and the bot adopts your version.
 
 ## Commands
 

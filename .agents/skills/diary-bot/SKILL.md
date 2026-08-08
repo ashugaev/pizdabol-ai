@@ -20,7 +20,7 @@ Use this as project memory for implementation and validation.
 | Notion schema, retries, duplicate checks, writes | `services/notion.py`, `tests/test_notion.py` |
 | Retrospective profile rebuild (`/memory`) | `services/profile_rebuild.py`, `tests/test_profile_rebuild.py` |
 | Roast persona, author profile, behavior rules | `services/roast.py`, `tests/test_roast.py` |
-| Memory mirror to Notion pages next to the database | `services/notion_memory.py`, `tests/test_notion_memory.py` |
+| Memory sync with Notion pages next to the database | `services/notion_memory.py`, `tests/test_notion_memory.py` |
 | Local message and draft state | `services/state_store.py`, `tests/test_state_store.py` |
 | Dev, test, deploy commands | `Makefile`, `README.md`, `.github/workflows/ci.yml` |
 
@@ -35,7 +35,7 @@ Use this as project memory for implementation and validation.
 - Long transcriptions use metadata-only formatting and keep original text.
 - `/memory` rebuild is two-step (focus prompt, then confirm), sequential, single-flight, and persists points after every note.
 - Behavior rules outrank the roast persona, are amended by the model in any turn via a trailing `RULES_MARKER` delta block, and are stripped from the reply. No delta or a no-op delta must never rewrite stored state.
-- Notion memory pages (`Memory — Author profile`, `Memory — Bot rules`) are mirrors of local state, never a source of truth. Sync rewrites the body, skips writing when unchanged, and never blocks the diary flow. The profile rebuild mirrors once at the end, not per note.
+- Notion memory pages (`Memory — Author profile`, `Memory — Bot rules`) sync both ways. A page whose bullets no longer match the stored `notion_mirror` was hand-edited and wins; otherwise the page is rewritten from local state. Pull before every read of memory (roast, `/rules`, `/memory`, startup), push after every change, never block the diary flow. The profile rebuild pulls once at the start and pushes once at the end, not per note.
 
 ## External boundaries
 
