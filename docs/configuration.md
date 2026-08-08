@@ -87,6 +87,14 @@ Next to the database, inside the same parent page, the bot keeps two pages it cr
 | `Memory — Author profile` | The durable facts the bot knows about you |
 | `Memory — Bot rules` | The standing behavior rules you dictated to the bot |
 
-Both are mirrors: local state is the source of truth and each sync rewrites the page body as a bulleted list with an `Updated ... · N items` header. Editing a page in Notion does not change what the bot knows — the next sync overwrites it. A sync that would change nothing writes nothing.
+Both sync in **both directions**, and a page you edited by hand wins. Each page is a bulleted list with an `Updated ... · N items` header — one bullet per item, and only the bullets count. The bot pulls before it reads its memory (every roast, `/rules`, `/memory`, and startup) and pushes after every change:
 
-The parent is taken from the database itself, so there is nothing to configure; the database has to live inside a page rather than at the workspace root. Mirroring is best-effort — an unreachable Notion never blocks the diary flow.
+| On the page | What happens |
+|---|---|
+| Same list the bot holds | Nothing — no read costs a write |
+| Changed since the bot's last write | **Notion wins** — the bullets are adopted into local state |
+| Still what the bot last wrote, but stale | The page is rewritten from local state |
+
+So editing bullets in Notion is a supported way to teach the bot: add, reword, reorder, or delete a bullet and the next roast uses your version. Emptying a page wipes that memory. Text you add outside the bullets is dropped on the next write.
+
+The parent is taken from the database itself, so there is nothing to configure; the database has to live inside a page rather than at the workspace root. Syncing is best-effort — an unreachable Notion never blocks the diary flow, and a write that failed is retried on the next sync rather than mistaken for a hand edit.

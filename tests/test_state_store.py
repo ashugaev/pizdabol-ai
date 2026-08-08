@@ -11,7 +11,7 @@ os.environ.setdefault("NOTION_DATABASE_ID", "test-notion-db")
 os.environ.setdefault("ALLOWED_USER_ID", "1")
 
 from services import state_store as state_store_module
-from services.state_store import StateStore
+from services.state_store import PROFILE_SECTION, RULES_SECTION, StateStore
 
 
 class StateStoreTests(unittest.TestCase):
@@ -82,6 +82,23 @@ class StateStoreTests(unittest.TestCase):
             store.set_rules(["  не задавай вопросов ", "", "пиши коротко", 5])
             self.assertEqual(store.get_rules(), ["не задавай вопросов", "пиши коротко"])
             self.assertEqual(StateStore(path).get_rules(), ["не задавай вопросов", "пиши коротко"])
+
+    def test_notion_mirror_persists_and_survives_a_local_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "state.json"
+            store = StateStore(path)
+            self.assertEqual(store.get_notion_mirror(RULES_SECTION), [])
+
+            store.set_notion_mirror(RULES_SECTION, ["пиши коротко"])
+            self.assertEqual(StateStore(path).get_notion_mirror(RULES_SECTION), ["пиши коротко"])
+
+            # Writing the rules must not drop what the Notion page is known to list,
+            # otherwise the next sync reads a hand edit into every stale page.
+            store.set_rules(["пиши коротко", "не задавай вопросов"])
+            self.assertEqual(store.get_notion_mirror(RULES_SECTION), ["пиши коротко"])
+
+            store.set_profile_points(["likes hiking"])
+            self.assertEqual(store.get_notion_mirror(PROFILE_SECTION), [])
 
     def test_state_written_before_rules_existed_still_loads(self):
         with tempfile.TemporaryDirectory() as tmpdir:

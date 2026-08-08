@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import logging
 import os
@@ -28,7 +29,7 @@ from services import notion_memory, profile_rebuild, roast
 from services.diary_dates import diary_today
 from services.formatter import format_entry
 from services.notion import save_entry
-from services.state_store import state_store
+from services.state_store import PROFILE_SECTION, RULES_SECTION, state_store
 from services.stats import build_audio_stats, format_audio_stats
 from services.summary import generate_daily_summary, generate_weekly_report
 from services.whisper import transcribe
@@ -679,32 +680,53 @@ async def _deliver_roast(reply_target, chain: list[dict], context, status_messag
     return sent_messages[-1]
 
 
-async def _mirror_author_memory() -> None:
-    """Best-effort: push the persisted author profile to its Notion page."""
+async def _sync_author_memory() -> None:
+    """Best-effort two-way sync of the author profile with its Notion page. A
+    page edited by hand wins, so run this before reading the profile too."""
     try:
-        await notion_memory.sync_author_memory(state_store.get_profile_points())
+        result = await notion_memory.sync_author_memory(
+            state_store.get_profile_points(),
+            state_store.get_notion_mirror(PROFILE_SECTION),
+        )
     except Exception:
-        logger.exception("Failed to mirror the author profile to Notion")
+        logger.exception("Failed to sync the author profile with Notion")
+        return
+    if result.adopted:
+        state_store.set_profile_points(result.items)
+    state_store.set_notion_mirror(PROFILE_SECTION, result.items)
 
 
-async def _mirror_bot_memory() -> None:
-    """Best-effort: push the persisted behavior rules to their Notion page."""
+async def _sync_bot_memory() -> None:
+    """Best-effort two-way sync of the behavior rules with their Notion page."""
     try:
-        await notion_memory.sync_bot_memory(state_store.get_rules())
+        result = await notion_memory.sync_bot_memory(
+            state_store.get_rules(),
+            state_store.get_notion_mirror(RULES_SECTION),
+        )
     except Exception:
-        logger.exception("Failed to mirror the behavior rules to Notion")
+        logger.exception("Failed to sync the behavior rules with Notion")
+        return
+    if result.adopted:
+        state_store.set_rules(result.items)
+    state_store.set_notion_mirror(RULES_SECTION, result.items)
+
+
+async def _sync_memory() -> None:
+    """Pull hand edits from both memory pages before the bot reads its memory."""
+    await asyncio.gather(_sync_author_memory(), _sync_bot_memory())
 
 
 async def _update_profile_points(diary_text: str) -> None:
     """Best-effort: refresh the persisted author profile from a diary entry.
     Never blocks or breaks the roast flow — failures are logged and swallowed."""
+    await _sync_author_memory()
     try:
         existing = state_store.get_profile_points()
         points = await roast.extract_profile_points(diary_text, existing)
         state_store.set_profile_points(points)
     except Exception:
         logger.exception("Failed to update roast profile points")
-    await _mirror_author_memory()
+    await _sync_author_memory()
 
 
 async def _persist_rules_delta(reply_target, chain: list[dict], before: list[str], delta: dict | None) -> None:
@@ -725,10 +747,12 @@ async def _persist_rules_delta(reply_target, chain: list[dict], before: list[str
     # Map the note to the chain too, so replying to it keeps the conversation.
     _store_roast_chain(_message_chat_id(note), note.message_id, chain)
     # Last, so Notion latency never delays the note.
-    await _mirror_bot_memory()
+    await _sync_bot_memory()
 
 
 async def _run_roast(reply_target, chain: list[dict], context, status_message=None) -> None:
+    # Hand edits in Notion outrank stored memory, so pull before reading it.
+    await _sync_memory()
     points = state_store.get_profile_points()
     rules = state_store.get_rules()
     try:
@@ -817,6 +841,8 @@ async def post_init(application: Application) -> None:
         await notion_memory.ensure_memory_pages()
     except Exception:
         logger.exception("Failed to ensure the Notion memory pages exist")
+    # Adopt whatever was edited in Notion while the bot was down.
+    await _sync_memory()
     await replay_unprocessed_messages(application)
 
 
@@ -880,7 +906,9 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def handle_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the standing behavior rules. Editing happens in conversation: tell
-    the bot how to act, or to forget a rule, and it rewrites the list itself."""
+    the bot how to act, or to forget a rule, and it rewrites the list itself.
+    Rules typed straight into the Notion page count too — they are pulled first."""
+    await _sync_bot_memory()
     rules = state_store.get_rules()
     if not rules:
         await update.effective_message.reply_text(
@@ -1682,6 +1710,7 @@ async def _run_memory_rebuild(
 ) -> None:
     """Drive the sequential rebuild: persist points after every note so an abort or
     a restart never loses the pass, and refresh the progress message on a throttle."""
+    await _sync_author_memory()
     before = state_store.get_profile_points()
     last_rendered = None
 
@@ -1711,8 +1740,8 @@ async def _run_memory_rebuild(
             await _edit_reply_message(context, status_message, f"Memory rebuild failed: {e}")
         return
 
-    # One mirror write for the whole pass, not one per note.
-    await _mirror_author_memory()
+    # One sync for the whole pass, not one per note.
+    await _sync_author_memory()
 
     with suppress(Exception):
         await _edit_reply_message(
