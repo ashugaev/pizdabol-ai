@@ -1,3 +1,4 @@
+import asyncio
 import os
 import unittest
 from datetime import date
@@ -1474,14 +1475,31 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_update_profile_points_extracts_persists_and_mirrors(self):
         with patch.object(bot.state_store, "get_profile_points", return_value=_items("old fact")), \
                 patch.object(bot.roast, "extract_profile_points", new=AsyncMock(return_value=_items("fresh fact"))) as extract, \
-                patch.object(bot, "_sync_author_memory", new=AsyncMock()) as sync, \
+                patch.object(bot, "_sync_author_memory", new=AsyncMock()) as pull, \
+                patch.object(bot, "_sync_author_memory_held", new=AsyncMock()) as push, \
                 patch.object(bot.state_store, "set_profile_points") as save:
             await bot._update_profile_points("today's entry")
 
         extract.assert_awaited_once_with("today's entry", _items("old fact"))
         save.assert_called_once_with(_items("fresh fact"))
         # Pull hand edits before extracting, push the merged profile after.
-        self.assertEqual(sync.await_count, 2)
+        pull.assert_awaited_once()
+        push.assert_awaited_once()
+
+    async def test_a_profile_moved_while_extracting_drops_the_pass(self):
+        # A hand edit adopted mid-extraction must not be overwritten by a list
+        # merged from the stale read.
+        moved = [_items("old fact"), _items("typed by hand")]
+
+        with patch.object(bot.state_store, "get_profile_points", side_effect=moved), \
+                patch.object(bot.roast, "extract_profile_points", new=AsyncMock(return_value=_items("fresh fact"))), \
+                patch.object(bot, "_sync_author_memory", new=AsyncMock()), \
+                patch.object(bot, "_sync_author_memory_held", new=AsyncMock()) as push, \
+                patch.object(bot.state_store, "set_profile_points") as save:
+            await bot._update_profile_points("today's entry")
+
+        save.assert_not_called()
+        push.assert_not_awaited()
 
     async def test_update_profile_points_swallows_failures(self):
         with patch.object(bot.state_store, "get_profile_points", return_value=[]), \
@@ -2067,6 +2085,9 @@ class MemoryRebuildRunnerTests(unittest.IsolatedAsyncioTestCase):
 class MemorySyncTests(unittest.IsolatedAsyncioTestCase):
     """Local state and the Notion memory pages, kept together in both directions."""
 
+    def setUp(self):
+        bot._last_memory_pull = 0.0
+
     def _sync(self, adopted: bool, items: list[str], failure: Exception | None = None):
         return AsyncMock(
             side_effect=failure,
@@ -2141,10 +2162,58 @@ class MemorySyncTests(unittest.IsolatedAsyncioTestCase):
         application = SimpleNamespace(bot=SimpleNamespace(set_my_commands=AsyncMock()))
 
         with patch.object(bot.notion_memory, "ensure_memory_pages", new=AsyncMock()), \
-                patch.object(bot, "_sync_author_memory", new=AsyncMock()) as author, \
-                patch.object(bot, "_sync_bot_memory", new=AsyncMock()) as rules, \
+                patch.object(bot, "_sync_author_memory_held", new=AsyncMock()) as author, \
+                patch.object(bot, "_sync_bot_memory_held", new=AsyncMock()) as rules, \
                 patch.object(bot, "replay_unprocessed_messages", new=AsyncMock()):
             await bot.post_init(application)
 
         author.assert_awaited_once()
         rules.assert_awaited_once()
+
+    async def test_a_second_pull_inside_the_window_reuses_the_first(self):
+        with patch.object(bot, "_sync_author_memory_held", new=AsyncMock()) as author, \
+                patch.object(bot, "_sync_bot_memory_held", new=AsyncMock()):
+            await bot._sync_memory()
+            await bot._sync_memory()
+
+        # A roast follow-up seconds later must not cost two more Notion reads.
+        author.assert_awaited_once()
+
+    async def test_an_expired_window_pulls_again(self):
+        with patch.object(bot, "_sync_author_memory_held", new=AsyncMock()) as author, \
+                patch.object(bot, "_sync_bot_memory_held", new=AsyncMock()):
+            await bot._sync_memory()
+            bot._last_memory_pull -= bot.MEMORY_PULL_TTL_SECONDS
+            await bot._sync_memory()
+
+        self.assertEqual(author.await_count, 2)
+
+    async def test_explicit_reads_ignore_the_window(self):
+        # /rules and /memory ask for the current list, so they always pull.
+        with patch.object(bot, "_sync_bot_memory_held", new=AsyncMock()) as rules, \
+                patch.object(bot, "_sync_author_memory_held", new=AsyncMock()):
+            await bot._sync_memory()
+            await bot._sync_bot_memory()
+
+        self.assertEqual(rules.await_count, 2)
+
+    async def test_memory_is_touched_by_one_coroutine_at_a_time(self):
+        running = 0
+        peak = 0
+
+        async def slow_sync():
+            nonlocal running, peak
+            running += 1
+            peak = max(peak, running)
+            await asyncio.sleep(0)
+            running -= 1
+
+        with patch.object(bot, "_sync_author_memory_held", new=slow_sync), \
+                patch.object(bot, "_sync_bot_memory_held", new=AsyncMock()):
+            await asyncio.gather(
+                bot._sync_author_memory(),
+                bot._sync_author_memory(),
+                bot._sync_author_memory(),
+            )
+
+        self.assertEqual(peak, 1)
