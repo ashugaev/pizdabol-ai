@@ -2149,7 +2149,8 @@ class MemorySyncTests(unittest.IsolatedAsyncioTestCase):
     """Local state and the Notion memory pages, kept together in both directions."""
 
     def setUp(self):
-        bot._last_memory_pull = 0.0
+        # Never pulled. A zero would throttle on a host booted under a minute ago.
+        bot._last_memory_pull = None
 
     def _sync(self, adopted: bool, items: list[str], failure: Exception | None = None):
         return AsyncMock(
@@ -2240,6 +2241,16 @@ class MemorySyncTests(unittest.IsolatedAsyncioTestCase):
             await bot._sync_memory()
 
         # A roast follow-up seconds later must not cost two more Notion reads.
+        author.assert_awaited_once()
+
+    async def test_a_freshly_booted_host_still_pulls(self):
+        # `monotonic()` counts from boot: right after one, every timestamp is a
+        # small number and must not read as a pull that just happened.
+        with patch.object(bot, "monotonic", return_value=1.0), \
+                patch.object(bot, "_sync_author_memory_held", new=AsyncMock()) as author, \
+                patch.object(bot, "_sync_bot_memory_held", new=AsyncMock()):
+            await bot._sync_memory()
+
         author.assert_awaited_once()
 
     async def test_an_expired_window_pulls_again(self):

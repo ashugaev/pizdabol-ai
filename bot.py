@@ -72,7 +72,9 @@ RULES_BLOCK_LABEL = "Rules"
 # startup, against both local state and Notion. One lock covers all of it, so
 # only one of them touches memory at a time. Never held across a model call.
 _memory_lock = asyncio.Lock()
-_last_memory_pull = 0.0
+# None until the first pull. `monotonic()` counts from boot, so a numeric zero
+# would read as "pulled just now" on a freshly booted host and skip that pull.
+_last_memory_pull: float | None = None
 
 # In-memory (RAM-only) roast conversations, keyed by "chat_id:message_id" of each
 # bot roast message. Replying to one of those messages continues that conversation.
@@ -751,7 +753,7 @@ async def _sync_memory() -> None:
     call the per-page syncs directly and always pull."""
     global _last_memory_pull
     # Checked before the lock, so a throttled turn waits on nothing.
-    if monotonic() - _last_memory_pull < MEMORY_PULL_TTL_SECONDS:
+    if _last_memory_pull is not None and monotonic() - _last_memory_pull < MEMORY_PULL_TTL_SECONDS:
         return
     async with _memory_lock:
         await _sync_author_memory_held()
