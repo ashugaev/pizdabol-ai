@@ -9,6 +9,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from html import escape
+from time import monotonic
 from types import SimpleNamespace
 from typing import Any
 
@@ -57,6 +58,14 @@ MEMORY_SKIP_FOCUS_TOKENS = {"-", "--", "—", "skip", "no", "none"}
 # Refresh the progress message every N notes: a full pass can be hundreds of
 # notes, and one edit per note would hit Telegram's rate limit.
 MEMORY_PROGRESS_EVERY = 5
+# How long a roast may reuse the last pull from the Notion memory pages.
+MEMORY_PULL_TTL_SECONDS = 60
+
+# Memory is read-modify-written from a roast, a background profile extraction and
+# startup, against both local state and Notion. One lock covers all of it, so
+# only one of them touches memory at a time. Never held across a model call.
+_memory_lock = asyncio.Lock()
+_last_memory_pull = 0.0
 
 # In-memory (RAM-only) roast conversations, keyed by "chat_id:message_id" of each
 # bot roast message. Replying to one of those messages continues that conversation.
@@ -681,8 +690,19 @@ async def _deliver_roast(reply_target, chain: list[dict], context, status_messag
 
 
 async def _sync_author_memory() -> None:
+    async with _memory_lock:
+        await _sync_author_memory_held()
+
+
+async def _sync_bot_memory() -> None:
+    async with _memory_lock:
+        await _sync_bot_memory_held()
+
+
+async def _sync_author_memory_held() -> None:
     """Best-effort two-way sync of the author profile with its Notion page. A
-    page edited by hand wins, so run this before reading the profile too."""
+    page edited by hand wins, so run this before reading the profile too.
+    Caller holds `_memory_lock`."""
     points = state_store.get_profile_points()
     try:
         result = await notion_memory.sync_author_memory(
@@ -699,8 +719,9 @@ async def _sync_author_memory() -> None:
     state_store.set_notion_mirror(PROFILE_SECTION, result.items)
 
 
-async def _sync_bot_memory() -> None:
-    """Best-effort two-way sync of the behavior rules with their Notion page."""
+async def _sync_bot_memory_held() -> None:
+    """Best-effort two-way sync of the behavior rules with their Notion page.
+    Caller holds `_memory_lock`."""
     rules = state_store.get_rules()
     try:
         result = await notion_memory.sync_bot_memory(
@@ -716,21 +737,40 @@ async def _sync_bot_memory() -> None:
 
 
 async def _sync_memory() -> None:
-    """Pull hand edits from both memory pages before the bot reads its memory."""
-    await asyncio.gather(_sync_author_memory(), _sync_bot_memory())
+    """Pull hand edits from both memory pages before a roast reads its memory.
+
+    Throttled: a roast is a conversation, and every follow-up turn would
+    otherwise cost two Notion reads. Explicit reads — /rules, /memory, startup —
+    call the per-page syncs directly and always pull."""
+    global _last_memory_pull
+    # Checked before the lock, so a throttled turn waits on nothing.
+    if monotonic() - _last_memory_pull < MEMORY_PULL_TTL_SECONDS:
+        return
+    async with _memory_lock:
+        await _sync_author_memory_held()
+        await _sync_bot_memory_held()
+        _last_memory_pull = monotonic()
 
 
 async def _update_profile_points(diary_text: str) -> None:
     """Best-effort: refresh the persisted author profile from a diary entry.
     Never blocks or breaks the roast flow — failures are logged and swallowed."""
     await _sync_author_memory()
+    existing = state_store.get_profile_points()
     try:
-        existing = state_store.get_profile_points()
         points = await roast.extract_profile_points(diary_text, existing)
-        state_store.set_profile_points(points)
     except Exception:
         logger.exception("Failed to update roast profile points")
-    await _sync_author_memory()
+        return
+    async with _memory_lock:
+        # Extraction is slow, and a hand edit adopted while it ran would be
+        # overwritten by a list merged from a stale read. Drop this pass instead
+        # — the next diary message extracts again.
+        if state_store.get_profile_points() != existing:
+            logger.info("Author profile moved while extracting; dropping this pass")
+            return
+        state_store.set_profile_points(points)
+        await _sync_author_memory_held()
 
 
 async def _persist_rules_ops(

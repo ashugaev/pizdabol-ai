@@ -97,4 +97,6 @@ Both sync in **both directions**, and a page you edited by hand wins. Each page 
 
 So editing bullets in Notion is a supported way to teach the bot: add, reword, reorder, or delete a bullet and the next roast uses your version. Emptying a page wipes that memory. Text you add outside the bullets is dropped on the next write.
 
+A roast reuses the last pull for a minute, so a long back-and-forth does not re-read both pages on every turn. `/rules`, `/memory`, and startup always pull, so an edit you want picked up immediately is one `/rules` away. Nothing polls in the background — every read is triggered by something you did.
+
 The parent is taken from the database itself, so there is nothing to configure; the database has to live inside a page rather than at the workspace root. Syncing is best-effort — an unreachable Notion never blocks the diary flow, and a write that failed is retried on the next sync rather than mistaken for a hand edit.
