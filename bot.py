@@ -25,7 +25,7 @@ from telegram.ext import (
 )
 
 from config import settings
-from services import notion_memory, profile_rebuild, roast
+from services import memory, notion_memory, profile_rebuild, roast
 from services.diary_dates import diary_today
 from services.formatter import format_entry
 from services.notion import save_entry
@@ -683,31 +683,35 @@ async def _deliver_roast(reply_target, chain: list[dict], context, status_messag
 async def _sync_author_memory() -> None:
     """Best-effort two-way sync of the author profile with its Notion page. A
     page edited by hand wins, so run this before reading the profile too."""
+    points = state_store.get_profile_points()
     try:
         result = await notion_memory.sync_author_memory(
-            state_store.get_profile_points(),
+            memory.texts(points),
             state_store.get_notion_mirror(PROFILE_SECTION),
         )
     except Exception:
         logger.exception("Failed to sync the author profile with Notion")
         return
+    # The page carries no ids, so an adopted list keeps them where the text
+    # survived the edit and mints fresh ones for what the author reworded.
     if result.adopted:
-        state_store.set_profile_points(result.items)
+        state_store.set_profile_points(memory.adopt(points, result.items))
     state_store.set_notion_mirror(PROFILE_SECTION, result.items)
 
 
 async def _sync_bot_memory() -> None:
     """Best-effort two-way sync of the behavior rules with their Notion page."""
+    rules = state_store.get_rules()
     try:
         result = await notion_memory.sync_bot_memory(
-            state_store.get_rules(),
+            memory.texts(rules),
             state_store.get_notion_mirror(RULES_SECTION),
         )
     except Exception:
         logger.exception("Failed to sync the behavior rules with Notion")
         return
     if result.adopted:
-        state_store.set_rules(result.items)
+        state_store.set_rules(memory.adopt(rules, result.items))
     state_store.set_notion_mirror(RULES_SECTION, result.items)
 
 
@@ -729,20 +733,26 @@ async def _update_profile_points(diary_text: str) -> None:
     await _sync_author_memory()
 
 
-async def _persist_rules_delta(reply_target, chain: list[dict], before: list[str], delta: dict | None) -> None:
-    """Store a rules delta the model attached to its reply and tell the author.
+async def _persist_rules_ops(
+    reply_target,
+    chain: list[dict],
+    before: list[memory.MemoryItem],
+    ops: list | None,
+) -> None:
+    """Store the rule operations the model attached to its reply and tell the author.
 
-    No delta, or a delta that changes nothing, leaves the stored list untouched:
-    the model only sends one when it actually wants the rules changed."""
-    if not delta:
+    No operations, or operations that change nothing, leave the stored list
+    untouched: the model only sends them when it wants the rules changed."""
+    if not ops:
         return
-    after = roast.apply_delta(before, delta)
+    after = memory.apply_ops(before, ops)
     if after == before:
         return
     state_store.set_rules(after)
+    before_texts, after_texts = memory.texts(before), memory.texts(after)
     lines = ["🧠 Rules updated"]
-    lines += [f"+ {rule}" for rule in after if rule not in before]
-    lines += [f"− {rule}" for rule in before if rule not in after]
+    lines += [f"+ {rule}" for rule in after_texts if rule not in before_texts]
+    lines += [f"− {rule}" for rule in before_texts if rule not in after_texts]
     note = await _reply_to_source(reply_target, "\n".join(lines))
     # Map the note to the chain too, so replying to it keeps the conversation.
     _store_roast_chain(_message_chat_id(note), note.message_id, chain)
@@ -768,7 +778,7 @@ async def _run_roast(reply_target, chain: list[dict], context, status_message=No
     chain.append({"role": "assistant", "content": reply.text})
     last = await _deliver_roast(reply_target, chain, context, status_message=status_message)
     try:
-        await _persist_rules_delta(last, chain, rules, reply.rules_delta)
+        await _persist_rules_ops(last, chain, rules, reply.rules_ops)
     except Exception:
         logger.exception("Failed to persist roast rules update")
 
@@ -915,7 +925,9 @@ async def handle_rules(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             "🧠 No rules yet. Tell me in a roast reply how to behave — I'll remember it."
         )
         return
-    lines = ["🧠 Rules"] + [f"{index}. {rule}" for index, rule in enumerate(rules, 1)]
+    lines = ["🧠 Rules"] + [
+        f"{index}. {rule}" for index, rule in enumerate(memory.texts(rules), 1)
+    ]
     await update.effective_message.reply_text("\n".join(lines))
 
 

@@ -22,6 +22,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 
 from services import roast
+from services.memory import MemoryItem
 from services.notion import CREATED_PROPERTY, extract_page_title, get_diary_pages, get_page_text
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ class RebuildProgress:
     processed: int
     skipped: int
     failed: int
-    points: list[str]
+    points: list[MemoryItem]
     aborted_reason: str | None = None
 
     @property
@@ -100,7 +101,11 @@ def _note_text(page: dict, body: str) -> str:
     return f"{header}\n\n{body}" if header else body
 
 
-async def _rebuild_step(page: dict, points: list[str], focus: str | None) -> tuple[str, list[str]]:
+async def _rebuild_step(
+    page: dict,
+    points: list[MemoryItem],
+    focus: str | None,
+) -> tuple[str, list[MemoryItem]]:
     """Fold one note into the profile. Never raises: on failure the caller keeps
     the points it already had and the walk moves on."""
     page_id = page.get("id")
@@ -131,7 +136,7 @@ async def _report(on_progress, progress: RebuildProgress) -> None:
 
 async def rebuild_profile(
     focus: str | None,
-    existing_points: list[str],
+    existing_points: list[MemoryItem],
     on_progress=None,
 ) -> RebuildProgress:
     """Rebuild the author profile from every saved diary note, oldest first.

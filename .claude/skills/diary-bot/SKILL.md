@@ -19,6 +19,7 @@ Use this as project memory for implementation and validation.
 | Daily and weekly summaries (provider-neutral) | `services/summary.py`, `tests/test_openai_services.py` |
 | Notion schema, retries, duplicate checks, writes | `services/notion.py`, `tests/test_notion.py` |
 | Retrospective profile rebuild (`/memory`) | `services/profile_rebuild.py`, `tests/test_profile_rebuild.py` |
+| ID-addressed memory: ops protocol, ids, merge | `services/memory.py`, `tests/test_memory.py` |
 | Roast persona, author profile, behavior rules | `services/roast.py`, `tests/test_roast.py` |
 | Memory sync with Notion pages next to the database | `services/notion_memory.py`, `tests/test_notion_memory.py` |
 | Local message and draft state | `services/state_store.py`, `tests/test_state_store.py` |
@@ -34,8 +35,10 @@ Use this as project memory for implementation and validation.
 - Notion save retries transient errors and verifies created page before marking saved.
 - Long transcriptions use metadata-only formatting and keep original text.
 - `/memory` rebuild is two-step (focus prompt, then confirm), sequential, single-flight, and persists points after every note.
-- Behavior rules outrank the roast persona, are amended by the model in any turn via a trailing `RULES_MARKER` delta block, and are stripped from the reply. No delta or a no-op delta must never rewrite stored state.
-- Notion memory pages (`Memory — Author profile`, `Memory — Bot rules`) sync both ways. A page whose bullets no longer match the stored `notion_mirror` was hand-edited and wins; otherwise the page is rewritten from local state. Pull before every read of memory (roast, `/rules`, `/memory`, startup), push after every change, never block the diary flow. The profile rebuild pulls once at the start and pushes once at the end, not per note.
+- Both memory stores (author profile, behavior rules) are accumulated `MemoryItem` lists edited only through `memory.apply_ops`: the model returns `create`/`modify`/`delete` operations addressing an item id, never a rewritten list. An unknown id is a logged no-op. Ids persist in state; list size and item length are guided in the prompt, never trimmed in code.
+- The profile only shrinks when a fact went false or folds into a duplicate. Never drop a fact for being weak, small, or absent from the current note.
+- Behavior rules outrank the roast persona, carry their ids into the roast system prompt, and are amended by the model in any turn via a trailing `RULES_MARKER` ops block that is stripped from the reply. No ops, or ops that change nothing, must never rewrite stored state.
+- Notion memory pages (`Memory — Author profile`, `Memory — Bot rules`) sync both ways in plain text — ids stay internal. A page whose bullets no longer match the stored `notion_mirror` was hand-edited and wins; otherwise the page is rewritten from local state. Adopt through `memory.adopt`, which keeps the id of every bullet whose text survived the edit. Pull before every read of memory (roast, `/rules`, `/memory`, startup), push after every change, never block the diary flow. The profile rebuild pulls once at the start and pushes once at the end, not per note.
 
 ## External boundaries
 

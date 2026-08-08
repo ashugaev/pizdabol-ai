@@ -3,7 +3,9 @@ import logging
 from typing import NamedTuple
 
 from config import settings
+from services import memory
 from services.ai import create_chat_client
+from services.memory import MemoryItem
 
 logger = logging.getLogger(__name__)
 
@@ -19,49 +21,62 @@ RULES_MARKER = "<<<RULES>>>"
 # Soft guidance passed to the model only — never enforced mechanically.
 MAX_RULE_LENGTH = 120
 
-# Compact author profile the model maintains across roasts.
-# The extractor answers with a delta, so a steady-state completion is tiny. The
-# budget is sized for the worst case instead — a first pass over a dense note
-# that adds many facts at once — with room for the reasoning tokens that count
+# Accumulated author profile the model maintains across roasts.
+# The extractor answers with per-fact operations, so a steady-state completion is
+# tiny. The budget is sized for the worst case instead — a dense note that
+# creates many facts at once — with room for the reasoning tokens that count
 # against the same ceiling.
 PROFILE_MAX_COMPLETION_TOKENS = 8192
+# What one note can plausibly add. The profile as a whole is far larger, but a
+# single pass only ever reports its own changes, so this is what the budget must
+# cover.
+MAX_PROFILE_OPS_PER_NOTE = 40
 # Pinned low: this is mechanical merge/dedup work, and on reasoning models any
 # effort left unpinned eats the completion budget and truncates the answer.
 PROFILE_REASONING_EFFORT = "low"
 # Soft guidance passed to the model only — never enforced mechanically.
-MAX_PROFILE_POINTS = 100
+MAX_PROFILE_POINTS = 400
 MAX_PROFILE_POINT_LENGTH = 200
 
-PROFILE_EXTRACTION_PROMPT = f"""Ты ведёшь компактный профиль автора дневника, чтобы лучше понимать, кто он, и точнее его направлять.
-Ты обновляешь профиль после КАЖДОЙ записи в дневнике, поэтому будь особенно строг: лучше 0 новых фактов, чем дубли или мусор.
-На вход дают новую запись из дневника и уже известные факты о человеке.
+PROFILE_EXTRACTION_PROMPT = f"""Ты ведёшь профиль автора дневника — накопительную базу знаний о том, кто он, чтобы лучше его понимать и точнее направлять.
+Профиль КОПИТСЯ. Он обновляется после КАЖДОЙ записи и со временем должен становиться больше и подробнее. Потерять уже известный факт — самая дорогая ошибка, дороже, чем не добавить новый.
+На вход дают новую запись из дневника и уже известные факты, каждый со своим id.
 
-Собирай ТОЛЬКО устойчивый, значимый контекст — то, что влияет на его решения, состояние и путь в целом. Именно это стоит копить:
+Собирай устойчивый, значимый контекст — то, что влияет на его решения, состояние и путь в целом. Тяни широко, по всем срезам:
 - Долгосрочные черты личности и характер — то, что вряд ли изменится.
 - Его байасы, установки, привычные способы мышления и реакции.
 - Ценности, внутренние драйверы, страхи и мотивации.
 - Повторяющиеся паттерны в поведении и в принятии решений.
-- Ключевые отношения, работа/проекты, крупные цели.
+- Ключевые отношения: кто рядом, какая роль, какая динамика.
+- Работа, проекты, деньги, крупные цели.
+- Тело, здоровье, сон, режим, привычки — если это устойчиво, а не про один день.
+- Навыки, интересы, чем он реально хорош.
 - Текущая жизненная фаза или период, который он сейчас проходит: это среднесрочный, глобальный контекст (не про один день), и его нужно обновлять, когда фаза меняется.
 
-ВЫБРАСЫВАЙ разовое и то, что верно лишь в один момент: что он поел, туалетные и телесные события, настроение одной минуты, простой пересказ прошедшего дня. Это НЕ устойчивые факты о человеке — не сохраняй их.
+НЕ сохраняй разовое и то, что верно лишь в один момент: что он поел, туалетные и телесные события, настроение одной минуты, простой пересказ прошедшего дня.
+Но вывод из разового сохраняй, если он устойчивый: сам эпизод — мусор, а паттерн за ним — факт.
 
 Правила:
-- Каждый факт — одно самодостаточное предложение, ориентировочно до {MAX_PROFILE_POINT_LENGTH} символов; это ориентир, а не жёсткий обрез — не режь мысль ради лимита.
+- Факт — короткий самодостаточный тезис, одно предложение, ориентировочно до {MAX_PROFILE_POINT_LENGTH} символов. Без воды. Это ориентир, а не жёсткий обрез — не режь мысль ради лимита.
 - Различай долгосрочное (черты, байасы) и среднесрочное (текущая фаза): формулируй так, чтобы было понятно, что есть что.
-- Держи примерно до {MAX_PROFILE_POINTS} самых важных фактов, лучше меньше; если их становится больше — объединяй и убирай слабое, а не обрезай по счётчику.
-- Семантический дедуп: объединяй факты, которые значат одно и то же, никогда не выдавай почти-дубли и переформулировки уже известного.
-- Обновляй факт, если запись его уточняет или он устарел (особенно текущую фазу); убирай то, что перестало быть правдой.
-- Лучше вернуть меньше фактов, чем добавить дубль или шум.
+- Дедуп по смыслу: не создавай почти-дубли и переформулировки уже известного. Новое уточняет известный факт — правь тот факт, а не добавляй рядом.
+- Объёма не бойся: пока фактов меньше {MAX_PROFILE_POINTS}, список просто растёт. Ничего не выкидывай ради краткости.
+- За один проход не больше {MAX_PROFILE_OPS_PER_NOTE} операций. Не влезло — подхватят следующие записи, профиль копится.
 - Пиши на русском.
 
-Ты возвращаешь ТОЛЬКО ИЗМЕНЕНИЯ профиля, а не профиль целиком. Уже известные факты, которых ты не тронул, сохраняются сами — НЕ перечисляй их.
-Верни СТРОГО JSON вида {{"add": ["..."], "remove": ["..."], "update": [{{"from": "...", "to": "..."}}]}} без пояснений.
-- "add" — новые устойчивые факты, которых ещё нет в known_facts.
-- "remove" — факты из known_facts, которые перестали быть правдой. Строку копируй из known_facts ДОСЛОВНО.
-- "update" — переформулировка или уточнение известного факта: "from" — дословная строка из known_facts, "to" — новая версия. Через update же объединяй дубли: один from -> to, остальные дубли в remove.
-- Если запись не добавляет ничего реально нового и устойчивого — верни {{"add": [], "remove": [], "update": []}}. Это нормальный и частый ответ.
-- Если фактов стало заметно больше {MAX_PROFILE_POINTS} — объединяй близкие через update и убирай слабые через remove."""
+УДАЛЯТЬ факт можно ТОЛЬКО в двух случаях:
+1) он перестал быть правдой или устарел — чаще всего это текущая фаза;
+2) он дубль другого факта, и ты сворачиваешь их в один.
+Других причин нет. Не удаляй факт за то, что он кажется мелким, слабым, неважным, старым или просто не относится к сегодняшней записи. Нет подтверждения в новой записи — факт остаётся как есть.
+
+Ты возвращаешь ТОЛЬКО ОПЕРАЦИИ над отдельными фактами, никогда не список целиком. Факты, которых ты не тронул, сохраняются сами — НЕ перечисляй их.
+Верни СТРОГО JSON вида {{"ops": [...]}} без пояснений. Каждая операция — один объект:
+- {{"action": "create", "text": "новый факт"}} — новый устойчивый факт, которого ещё нет.
+- {{"action": "modify", "id": "<id из known_facts>", "text": "новая версия"}} — уточнить или переформулировать известный факт. Так же сворачивай дубли: один правишь, остальные удаляешь.
+- {{"action": "delete", "id": "<id из known_facts>"}} — только по двум причинам выше.
+id бери ДОСЛОВНО из known_facts. Неизвестный id — операция пропадёт, поэтому не выдумывай их.
+Запись не даёт ничего устойчиво нового — верни {{"ops": []}}. Это нормальный и частый ответ.
+Фактов стало заметно больше {MAX_PROFILE_POINTS} — сворачивай близкие через modify, а не выкидывай через delete."""
 
 # Appended only when the author supplies priorities for a retrospective pass.
 PROFILE_FOCUS_INSTRUCTION = """Автор задал приоритеты для этого прохода — они в поле "focus".
@@ -100,43 +115,47 @@ RULES_HEADER = """Правила поведения, которые задал �
 
 # Always appended, even with an empty rules list — this is how the first rule
 # ever gets recorded.
-RULES_PROTOCOL_PROMPT = f"""Список правил поведения ты ведёшь сам и можешь менять его в ЛЮБОМ ответе: хоть в первом разъёбе, хоть в follow-up реплике. Если списка выше нет — он пока пустой.
-- Автор просит вести себя иначе, поправляет тебя, задаёт рамку на будущее — добавь правило. Просит забыть или отменяет прошлое — убери.
+RULES_PROTOCOL_PROMPT = f"""Список правил поведения ты ведёшь сам и можешь менять его в ЛЮБОМ ответе: хоть в первом разъёбе, хоть в follow-up реплике. У каждого правила выше есть id в квадратных скобках. Если списка выше нет — он пока пустой.
+- Автор просит вести себя иначе, поправляет тебя, задаёт рамку на будущее — добавь правило. Просит забыть или отменяет прошлое — удали.
 - Только устойчивое «как себя вести». Факты про автора сюда НЕ пиши, для них есть отдельный профиль.
 - Одно правило — одно короткое простое предложение в повелительном наклонении, до {MAX_RULE_LENGTH} символов.
 - Не добавляй то, что по смыслу уже есть в списке.
-Чтобы поменять список, допиши в САМЫЙ КОНЕЦ ответа отдельную строку:
-{RULES_MARKER}{{"add": ["..."], "remove": ["..."], "update": [{{"from": "...", "to": "..."}}]}}
-- "add" — новые правила. "remove" — правила из списка, строку копируй ДОСЛОВНО. "update" — переформулировка: "from" дословно из списка, "to" — новая версия.
+- Удаляй правило только когда автор его отменил или оно свернулось в другое. Не чисти список по своему усмотрению.
+Чтобы поменять список, допиши в САМЫЙ КОНЕЦ ответа отдельную строку с операциями над отдельными правилами, не со списком целиком:
+{RULES_MARKER}{{"ops": [{{"action": "create", "text": "..."}}, {{"action": "modify", "id": "<id>", "text": "..."}}, {{"action": "delete", "id": "<id>"}}]}}
+- id бери ДОСЛОВНО из списка выше, без скобок. Неизвестный id — операция пропадёт.
 - Менять нечего — просто НЕ пиши эту строку. Так в подавляющем большинстве ответов.
 - После этой строки не пиши ничего. Автор её не видит: маркер и JSON в тексте ответа не упоминай и не пересказывай."""
 
 
 class RoastReply(NamedTuple):
-    """Visible answer plus the rules delta the model attached to it, if any."""
+    """Visible answer plus the rule operations the model attached to it, if any."""
 
     text: str
-    rules_delta: dict | None
+    rules_ops: list | None
 
 
 def is_configured() -> bool:
     return bool(settings.ai_api_key)
 
 
-def system_prompt(points: list[str] | None = None, rules: list[str] | None = None) -> str:
+def system_prompt(
+    points: list[MemoryItem] | None = None,
+    rules: list[MemoryItem] | None = None,
+) -> str:
     base = settings.roast_system_prompt or DEFAULT_SYSTEM_PROMPT
     language = (settings.roast_language or "").strip()
     if language:
         base = f"{base}\n\nВсегда пиши ответ на языке: {language}, независимо от языка записи в дневнике."
     if points:
-        joined = "\n".join(f"- {point}" for point in points)
+        joined = "\n".join(f"- {point}" for point in memory.texts(points))
         base = (
             f"{base}\n\nЧто ты уже знаешь об авторе (фон для понимания, не пересказывай это в лоб):\n{joined}"
         )
-    # Last, so the rules read as the final word over everything above them.
+    # Last, so the rules read as the final word over everything above them. Rules
+    # carry their ids: the model edits this list from inside its own reply.
     if rules:
-        joined = "\n".join(f"- {rule}" for rule in rules)
-        base = f"{base}\n\n{RULES_HEADER}\n{joined}"
+        base = f"{base}\n\n{RULES_HEADER}\n{memory.render(rules)}"
     return f"{base}\n\n{RULES_PROTOCOL_PROMPT}"
 
 
@@ -168,8 +187,8 @@ def split_rules_update(answer: str) -> RoastReply:
 
     No marker means no change — the normal case, and the reason a steady-state
     reply costs nothing extra. A marker with unreadable JSON is dropped along
-    with the block: the author never sees protocol scaffolding, and a delta we
-    cannot parse changes nothing on disk."""
+    with the block: the author never sees protocol scaffolding, and operations we
+    cannot parse change nothing on disk."""
     head, marker, tail = answer.partition(RULES_MARKER)
     if not marker:
         return RoastReply(answer.strip(), None)
@@ -179,17 +198,18 @@ def split_rules_update(answer: str) -> RoastReply:
     try:
         # raw_decode, not loads: it takes the leading object and ignores any
         # trailing junk — a closing fence, a second block, a stray line.
-        delta, _ = json.JSONDecoder().raw_decode(tail.strip().lstrip("`").strip())
+        block, _ = json.JSONDecoder().raw_decode(tail.strip().lstrip("`").strip())
     except ValueError:
         logger.warning("Roast reply carried an unparseable rules block; ignoring it")
         return RoastReply(text, None)
-    return RoastReply(text, delta if isinstance(delta, dict) else None)
+    ops = block.get("ops") if isinstance(block, dict) else None
+    return RoastReply(text, ops if isinstance(ops, list) and ops else None)
 
 
 async def roast(
     messages: list[dict],
-    points: list[str] | None = None,
-    rules: list[str] | None = None,
+    points: list[MemoryItem] | None = None,
+    rules: list[MemoryItem] | None = None,
 ) -> RoastReply:
     if not is_configured():
         raise RuntimeError("AI provider API key is not configured")
@@ -208,100 +228,26 @@ async def roast(
     return reply
 
 
-def _normalize_points(points: list) -> list[str]:
-    """Light hygiene only: drop non-strings, empties, and exact duplicates.
-    Point length and list size are guided at the prompt level — never trimmed
-    or capped mechanically."""
-    seen: set[str] = set()
-    result: list[str] = []
-    for point in points:
-        if not isinstance(point, str):
-            continue
-        text = " ".join(point.split())
-        if not text:
-            continue
-        key = text.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(text)
-    return result
-
-
-def _point_key(text: str) -> str:
-    """Match key for referring to a known fact. Whitespace- and case-insensitive
-    so a model that reflows or recases a quoted fact still matches it."""
-    return " ".join(str(text).split()).lower()
-
-
-def _clean_strings(values) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    return [" ".join(v.split()) for v in values if isinstance(v, str) and v.strip()]
-
-
-def _update_map(values) -> dict[str, str]:
-    """`[{"from": known, "to": revised}]` -> {match key of known: revised}."""
-    if not isinstance(values, list):
-        return {}
-    pairs = {}
-    for item in values:
-        if not isinstance(item, dict):
-            continue
-        source, target = item.get("from"), item.get("to")
-        if isinstance(source, str) and isinstance(target, str) and source.strip() and target.strip():
-            pairs[_point_key(source)] = " ".join(target.split())
-    return pairs
-
-
-def apply_delta(existing: list[str], delta: dict) -> list[str]:
-    """Fold a `{add, remove, update}` delta into a kept list of lines.
-
-    Shared by the author profile and the behavior rules — both are accumulated
-    lists the model amends with a delta instead of rewriting whole.
-
-    Existing order is preserved: updates rewrite in place, removals drop out,
-    and additions land at the end. A removal wins over an update of the same
-    fact, and an update whose "from" matches nothing is kept as an addition
-    rather than discarded — the model meant to record it either way."""
-    if not isinstance(delta, dict):
-        return _normalize_points(existing)
-    removals = {_point_key(text) for text in _clean_strings(delta.get("remove"))}
-    updates = _update_map(delta.get("update"))
-
-    result = []
-    for point in existing:
-        key = _point_key(point)
-        if key in removals:
-            updates.pop(key, None)
-            continue
-        result.append(updates.pop(key, point))
-
-    result.extend(updates.values())
-    result.extend(_clean_strings(delta.get("add")))
-    return _normalize_points(result)
-
-
 async def extract_profile_points(
     diary_text: str,
-    existing_points: list[str] | None = None,
+    existing_points: list[MemoryItem] | None = None,
     focus: str | None = None,
-) -> list[str]:
-    """Distill a compact, deduped set of durable facts about the author from a diary
-    entry, merged with what is already known. Returns the normalized full list.
+) -> list[MemoryItem]:
+    """Fold one diary entry into the accumulated author profile. Returns the new list.
 
-    The model answers with a `{add, remove, update}` delta rather than the whole
-    profile, so the completion size tracks how much actually changed instead of
-    how much has been learned — the profile can grow without approaching the
-    output ceiling. The merge happens here, in code.
+    The model answers with per-fact operations (create/modify/delete) against the
+    ids it was shown, never the profile itself: the completion tracks how much
+    actually changed instead of how much has been learned, so the profile can
+    grow indefinitely without approaching the output ceiling, and a fact the
+    model does not mention cannot be dropped. The merge happens in `memory`.
 
     `focus` carries the author's priorities for this extraction, if any: it steers
     what gets pulled out and how known facts are reframed, never what is stored."""
     if not is_configured():
         raise RuntimeError("AI provider API key is not configured")
 
-    existing = _normalize_points(existing_points or [])
-    request = {"diary_entry": diary_text, "known_facts": existing}
+    existing = list(existing_points or [])
+    request = {"diary_entry": diary_text, "known_facts": memory.dump(existing)}
     system_prompt = PROFILE_EXTRACTION_PROMPT
     if focus:
         request["focus"] = focus
@@ -324,9 +270,11 @@ async def extract_profile_points(
     text = _extract_text(response)
     if text:
         try:
-            return apply_delta(existing, json.loads(text))
+            block = json.loads(text)
         except json.JSONDecodeError:
-            pass
+            block = None
+        if isinstance(block, dict):
+            return memory.apply_ops(existing, block.get("ops"))
     logger.warning(
         "Profile extraction returned no usable JSON (finish_reason=%s); keeping the existing profile",
         _finish_reason(response),

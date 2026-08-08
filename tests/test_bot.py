@@ -1302,8 +1302,13 @@ class RoastKeyboardTests(unittest.TestCase):
         self.assertNotIn("roast:entry-1", callback_data)
 
 
-def _roast_reply(text, rules_delta=None):
-    return bot.roast.RoastReply(text, rules_delta)
+def _items(*texts):
+    """Stored memory as the bot holds it: text plus the id the model addresses."""
+    return [bot.memory.MemoryItem(str(index), text) for index, text in enumerate(texts, 1)]
+
+
+def _roast_reply(text, rules_ops=None):
+    return bot.roast.RoastReply(text, rules_ops)
 
 
 class RulesCommandTests(unittest.IsolatedAsyncioTestCase):
@@ -1315,7 +1320,7 @@ class RulesCommandTests(unittest.IsolatedAsyncioTestCase):
         return reply_text.await_args.args[0]
 
     async def test_rules_command_numbers_the_stored_rules(self):
-        text = await self._run(["не задавай вопросов", "пиши коротко"])
+        text = await self._run(_items("не задавай вопросов", "пиши коротко"))
         self.assertEqual(text, "🧠 Rules\n1. не задавай вопросов\n2. пиши коротко")
 
     async def test_rules_command_explains_an_empty_list(self):
@@ -1349,8 +1354,8 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(bot.roast, "is_configured", lambda: True), \
                 patch.object(bot.roast, "roast", new=fake_roast), \
-                patch.object(bot.state_store, "get_profile_points", return_value=["knows guitar"]), \
-                patch.object(bot.state_store, "get_rules", return_value=["будь короче"]), \
+                patch.object(bot.state_store, "get_profile_points", return_value=_items("knows guitar")), \
+                patch.object(bot.state_store, "get_rules", return_value=_items("будь короче")), \
                 patch.object(bot.state_store, "set_rules") as save_rules, \
                 patch.object(bot, "_sync_memory", new=AsyncMock()) as pulled, \
                 patch.object(bot, "_update_profile_points", new=AsyncMock()) as fake_update:
@@ -1361,9 +1366,9 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         pulled.assert_awaited_once()
         # Stored profile points ride along as context; roast no longer triggers a profile refresh
         # (extraction happens once at message ingestion).
-        self.assertEqual(captured_points, [["knows guitar"]])
-        # Behavior rules ride along too, and an answer without a delta saves nothing.
-        self.assertEqual(captured_rules, [["будь короче"]])
+        self.assertEqual(captured_points, [_items("knows guitar")])
+        # Behavior rules ride along too, and an answer without ops saves nothing.
+        self.assertEqual(captured_rules, [_items("будь короче")])
         save_rules.assert_not_called()
         fake_update.assert_not_awaited()
         self.assertEqual(captured, [[{"role": "user", "content": "got nothing done today"}]])
@@ -1375,7 +1380,7 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
             {"role": "assistant", "content": "Roast ready."},
         ])
 
-    async def _roast_with_delta(self, delta, stored_rules, save_rules):
+    async def _roast_with_ops(self, ops, stored_rules, save_rules):
         fake_bot = FakeRoastBot()
         query = SimpleNamespace(
             message=SimpleNamespace(chat_id=123, message_id=20, get_bot=lambda: fake_bot, reply_text=AsyncMock()),
@@ -1383,7 +1388,7 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         context = SimpleNamespace(bot=fake_bot, user_data={})
 
         with patch.object(bot.roast, "is_configured", lambda: True), \
-                patch.object(bot.roast, "roast", new=AsyncMock(return_value=_roast_reply("Roast ready.", delta))), \
+                patch.object(bot.roast, "roast", new=AsyncMock(return_value=_roast_reply("Roast ready.", ops))), \
                 patch.object(bot.state_store, "get_profile_points", return_value=[]), \
                 patch.object(bot.state_store, "get_rules", return_value=stored_rules), \
                 patch.object(bot.state_store, "set_rules", save_rules), \
@@ -1393,13 +1398,20 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
             await bot._roast_draft(query, context, {"id": "e", "text": "entry", "chat_id": 123})
         return fake_bot
 
-    async def test_rules_delta_in_a_reply_is_merged_saved_and_announced(self):
+    async def test_rule_ops_in_a_reply_are_applied_saved_and_announced(self):
         save_rules = MagicMock()
-        delta = {"add": ["не задавай вопросов"], "remove": ["будь мягче"]}
+        ops = [
+            {"action": "delete", "id": "1"},
+            {"action": "create", "text": "не задавай вопросов"},
+        ]
 
-        fake_bot = await self._roast_with_delta(delta, ["будь мягче", "пиши коротко"], save_rules)
+        fake_bot = await self._roast_with_ops(ops, _items("будь мягче", "пиши коротко"), save_rules)
 
-        save_rules.assert_called_once_with(["пиши коротко", "не задавай вопросов"])
+        # The surviving rule keeps its id; the new one gets a fresh one.
+        save_rules.assert_called_once_with([
+            bot.memory.MemoryItem("2", "пиши коротко"),
+            bot.memory.MemoryItem("3", "не задавай вопросов"),
+        ])
         # A saved change is mirrored to the Notion rules page.
         self.mirror.assert_awaited_once()
         note = fake_bot.sent[-1]["text"]
@@ -1409,28 +1421,31 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         # The roast text itself stays clean of protocol chatter.
         self.assertEqual(fake_bot.edits[-1]["text"], "Roast ready.")
 
-    async def test_reply_without_a_rules_delta_never_rewrites_the_list(self):
+    async def test_reply_without_rule_ops_never_rewrites_the_list(self):
         save_rules = MagicMock()
 
-        fake_bot = await self._roast_with_delta(None, ["пиши коротко"], save_rules)
+        fake_bot = await self._roast_with_ops(None, _items("пиши коротко"), save_rules)
 
         save_rules.assert_not_called()
         self.mirror.assert_not_awaited()
         self.assertEqual(len(fake_bot.sent), 1)  # status message only, no note
 
-    async def test_no_op_delta_never_rewrites_the_list(self):
-        # An empty or fully redundant delta must not touch stored rules.
-        for delta in ({"add": [], "remove": [], "update": []}, {"add": ["пиши коротко"]}):
-            with self.subTest(delta=delta):
+    async def test_ops_that_change_nothing_never_rewrite_the_list(self):
+        # A redundant create, or one aimed at an id that does not exist, must not
+        # touch stored rules.
+        for ops in ([{"action": "create", "text": "пиши коротко"}],
+                    [{"action": "delete", "id": "99"}],
+                    [{"action": "modify", "id": "99", "text": "orphan"}]):
+            with self.subTest(ops=ops):
                 save_rules = MagicMock()
-                fake_bot = await self._roast_with_delta(delta, ["пиши коротко"], save_rules)
+                fake_bot = await self._roast_with_ops(ops, _items("пиши коротко"), save_rules)
                 save_rules.assert_not_called()
                 self.assertEqual(len(fake_bot.sent), 1)
 
     async def test_rules_note_keeps_the_conversation_replyable(self):
         save_rules = MagicMock()
 
-        await self._roast_with_delta({"add": ["будь резче"]}, [], save_rules)
+        await self._roast_with_ops([{"action": "create", "text": "будь резче"}], [], save_rules)
 
         # Note is sent as message 1002 after the status edit (1001); replying to
         # either continues the same chain.
@@ -1439,7 +1454,9 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_failure_to_save_rules_never_breaks_the_roast(self):
         save_rules = MagicMock(side_effect=RuntimeError("disk on fire"))
 
-        fake_bot = await self._roast_with_delta({"add": ["будь резче"]}, [], save_rules)
+        fake_bot = await self._roast_with_ops(
+            [{"action": "create", "text": "будь резче"}], [], save_rules
+        )
 
         self.assertEqual(fake_bot.edits[-1]["text"], "Roast ready.")
 
@@ -1455,14 +1472,14 @@ class RoastFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ANTHROPIC_API_KEY", reply_text.await_args.args[0])
 
     async def test_update_profile_points_extracts_persists_and_mirrors(self):
-        with patch.object(bot.state_store, "get_profile_points", return_value=["old fact"]), \
-                patch.object(bot.roast, "extract_profile_points", new=AsyncMock(return_value=["fresh fact"])) as extract, \
+        with patch.object(bot.state_store, "get_profile_points", return_value=_items("old fact")), \
+                patch.object(bot.roast, "extract_profile_points", new=AsyncMock(return_value=_items("fresh fact"))) as extract, \
                 patch.object(bot, "_sync_author_memory", new=AsyncMock()) as sync, \
                 patch.object(bot.state_store, "set_profile_points") as save:
             await bot._update_profile_points("today's entry")
 
-        extract.assert_awaited_once_with("today's entry", ["old fact"])
-        save.assert_called_once_with(["fresh fact"])
+        extract.assert_awaited_once_with("today's entry", _items("old fact"))
+        save.assert_called_once_with(_items("fresh fact"))
         # Pull hand edits before extracting, push the merged profile after.
         self.assertEqual(sync.await_count, 2)
 
@@ -1961,7 +1978,7 @@ class MemoryRebuildRunnerTests(unittest.IsolatedAsyncioTestCase):
         self.status_message = SimpleNamespace(chat_id=123, message_id=20)
 
     async def _run(self, fake_rebuild, before=None):
-        with patch.object(bot.state_store, "get_profile_points", return_value=list(before or [])), \
+        with patch.object(bot.state_store, "get_profile_points", return_value=_items(*(before or []))), \
                 patch.object(bot.state_store, "set_profile_points") as saved, \
                 patch.object(bot, "_sync_author_memory", new=AsyncMock()) as self.mirror, \
                 patch.object(bot.profile_rebuild, "rebuild_profile", new=fake_rebuild):
@@ -1971,16 +1988,16 @@ class MemoryRebuildRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_progress_is_persisted_per_note_and_edits_are_throttled(self):
         async def fake_rebuild(focus, existing, on_progress):
             self.assertEqual(focus, "work")
-            self.assertEqual(existing, ["old"])
+            self.assertEqual(existing, _items("old"))
             for handled in range(7):
-                await on_progress(_memory_progress(handled, 6, ["old"] + ["f"] * handled))
-            return _memory_progress(6, 6, ["old"] + ["f"] * 6)
+                await on_progress(_memory_progress(handled, 6, _items("old", *(f"f{i}" for i in range(handled)))))
+            return _memory_progress(6, 6, _items("old", *(f"f{i}" for i in range(6))))
 
         saved = await self._run(fake_rebuild, before=["old"])
 
         # Every note persists, so an abort or a restart never loses the pass.
         self.assertEqual(saved.call_count, 7)
-        self.assertEqual(saved.call_args_list[3].args[0], ["old", "f", "f", "f"])
+        self.assertEqual(saved.call_args_list[3].args[0], _items("old", "f0", "f1", "f2"))
 
         # One pull before the pass and one write after it, not one per note.
         self.assertEqual(self.mirror.await_count, 2)
@@ -2057,8 +2074,10 @@ class MemorySyncTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_author_profile_edited_in_notion_replaces_local_state(self):
-        sync = self._sync(adopted=True, items=["typed by hand"])
-        with patch.object(bot.state_store, "get_profile_points", return_value=["stored fact"]), \
+        # The page carries plain text: an untouched bullet keeps its id, a
+        # reworded one becomes a new entry.
+        sync = self._sync(adopted=True, items=["stored fact", "typed by hand"])
+        with patch.object(bot.state_store, "get_profile_points", return_value=_items("stored fact")), \
                 patch.object(bot.state_store, "get_notion_mirror", return_value=["stored fact"]), \
                 patch.object(bot.notion_memory, "sync_author_memory", new=sync), \
                 patch.object(bot.state_store, "set_profile_points") as save, \
@@ -2066,24 +2085,25 @@ class MemorySyncTests(unittest.IsolatedAsyncioTestCase):
             await bot._sync_author_memory()
 
         sync.assert_awaited_once_with(["stored fact"], ["stored fact"])
-        save.assert_called_once_with(["typed by hand"])
-        remember.assert_called_once_with(bot.PROFILE_SECTION, ["typed by hand"])
+        save.assert_called_once_with(_items("stored fact", "typed by hand"))
+        remember.assert_called_once_with(bot.PROFILE_SECTION, ["stored fact", "typed by hand"])
 
     async def test_rules_edited_in_notion_replace_local_state(self):
         sync = self._sync(adopted=True, items=["typed by hand"])
-        with patch.object(bot.state_store, "get_rules", return_value=["stored rule"]), \
+        with patch.object(bot.state_store, "get_rules", return_value=_items("stored rule")), \
                 patch.object(bot.state_store, "get_notion_mirror", return_value=["stored rule"]), \
                 patch.object(bot.notion_memory, "sync_bot_memory", new=sync), \
                 patch.object(bot.state_store, "set_rules") as save, \
                 patch.object(bot.state_store, "set_notion_mirror") as remember:
             await bot._sync_bot_memory()
 
-        save.assert_called_once_with(["typed by hand"])
+        # The stored rule was reworded, so it is a different rule with a new id.
+        save.assert_called_once_with([bot.memory.MemoryItem("2", "typed by hand")])
         remember.assert_called_once_with(bot.RULES_SECTION, ["typed by hand"])
 
     async def test_an_untouched_page_leaves_local_state_alone(self):
         sync = self._sync(adopted=False, items=["stored rule"])
-        with patch.object(bot.state_store, "get_rules", return_value=["stored rule"]), \
+        with patch.object(bot.state_store, "get_rules", return_value=_items("stored rule")), \
                 patch.object(bot.state_store, "get_notion_mirror", return_value=[]), \
                 patch.object(bot.notion_memory, "sync_bot_memory", new=sync), \
                 patch.object(bot.state_store, "set_rules") as save, \
@@ -2096,7 +2116,7 @@ class MemorySyncTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_failing_sync_is_swallowed_and_changes_nothing(self):
         sync = self._sync(adopted=True, items=["x"], failure=RuntimeError("notion down"))
-        with patch.object(bot.state_store, "get_profile_points", return_value=["fact"]), \
+        with patch.object(bot.state_store, "get_profile_points", return_value=_items("fact")), \
                 patch.object(bot.state_store, "get_notion_mirror", return_value=["fact"]), \
                 patch.object(bot.notion_memory, "sync_author_memory", new=sync), \
                 patch.object(bot.state_store, "set_profile_points") as save, \
@@ -2111,7 +2131,7 @@ class MemorySyncTests(unittest.IsolatedAsyncioTestCase):
         update = SimpleNamespace(effective_message=message)
 
         with patch.object(bot, "_sync_bot_memory", new=AsyncMock()) as sync, \
-                patch.object(bot.state_store, "get_rules", return_value=["typed by hand"]):
+                patch.object(bot.state_store, "get_rules", return_value=_items("typed by hand")):
             await bot.handle_rules(update, SimpleNamespace())
 
         sync.assert_awaited_once()
