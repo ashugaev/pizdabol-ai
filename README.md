@@ -1,6 +1,6 @@
 # Pizdabol
 
-A Telegram bot that turns your voice (or text) messages into structured diary entries in Notion — with optional AI cleanup, daily and weekly summaries, and a blunt-but-caring "roast" mode. Built for the [Notion Journal](https://www.notion.com/help/guides/journal).
+A Telegram bot that turns your voice (or text) messages into structured diary entries in Notion, and doubles as a personal coach/therapist: it learns who you are on its own, builds a knowledge base about you from every note, and digs deeper into anything you reply to. Built for the [Notion Journal](https://www.notion.com/help/guides/journal).
 
 ## Quick start
 
@@ -19,9 +19,10 @@ You'll need a Telegram bot token, an OpenAI API key, and a Notion integration + 
 
 - **Send a voice or text note** — it's transcribed, titled, tagged, previewed, and saved as a Notion row.
 - **Edit before saving** — adjust title, text, tags, or date, or reformat the text; nothing is written until you press Save.
-- **🔥 Roast** — get an honest take on your entry, with follow-up chat; tell it to behave differently and it remembers.
+- **🔥 Roast, your personal coach** — an honest take on your entry; reply to it to keep talking and go deeper. Tell it to behave differently and it remembers.
+- **Learns you on its own** — builds a private knowledge base about you from every note, no extra input needed.
 - **Summaries** — automatic daily recap and an on-demand weekly report.
-- **Memory in Notion** — what the bot knows about you, and the rules you gave it, live on their own pages next to your diary database. Edit a page by hand and the bot adopts your version.
+- **Memory in Notion** — the knowledge base and the behavior rules you gave it live on their own pages next to your diary database. Edit a page by hand and the bot adopts your version.
 
 ## Commands
 
