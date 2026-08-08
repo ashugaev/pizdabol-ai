@@ -10,7 +10,7 @@ os.environ.setdefault("NOTION_TOKEN", "test-notion-token")
 os.environ.setdefault("NOTION_DATABASE_ID", "test-notion-db")
 os.environ.setdefault("ALLOWED_USER_ID", "1")
 
-from services import roast
+from services import memory, roast
 
 
 def _chat_response(text, finish_reason="stop"):
@@ -37,6 +37,15 @@ class FakeCompletions:
 class FakeOpenAI:
     def __init__(self, response):
         self.chat = SimpleNamespace(completions=FakeCompletions(response))
+
+
+def _items(*texts):
+    """Stored memory as the bot holds it: text plus the id the model addresses."""
+    return [memory.MemoryItem(str(index), text) for index, text in enumerate(texts, 1)]
+
+
+def _ops(*ops):
+    return json.dumps({"ops": list(ops)})
 
 
 class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -122,7 +131,10 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast.settings, "roast_language", ""), \
                 patch.object(roast, "client", fake):
-            await roast.roast([{"role": "user", "content": "x"}], points=["likes hiking", "avoids conflict"])
+            await roast.roast(
+                [{"role": "user", "content": "x"}],
+                points=_items("likes hiking", "avoids conflict"),
+            )
 
         system = fake.chat.completions.calls[0]["messages"][0]["content"]
         self.assertTrue(system.startswith(roast.DEFAULT_SYSTEM_PROMPT))
@@ -137,14 +149,15 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(roast, "client", fake):
             await roast.roast(
                 [{"role": "user", "content": "x"}],
-                points=["likes hiking"],
-                rules=["не задавай вопросов", "меньше мата"],
+                points=_items("likes hiking"),
+                rules=_items("не задавай вопросов", "меньше мата"),
             )
 
         system = fake.chat.completions.calls[0]["messages"][0]["content"]
         self.assertIn(roast.RULES_HEADER, system)
-        self.assertIn("- не задавай вопросов", system)
-        self.assertIn("- меньше мата", system)
+        # Rules carry their ids: the model edits them from inside its own reply.
+        self.assertIn("[1] не задавай вопросов", system)
+        self.assertIn("[2] меньше мата", system)
         # Rules outrank the persona and the profile, so they come after both.
         self.assertGreater(system.index(roast.RULES_HEADER), system.index("- likes hiking"))
 
@@ -160,50 +173,51 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(roast.RULES_MARKER, system)
         self.assertNotIn(roast.RULES_HEADER, system)
 
-    async def test_roast_returns_the_attached_rules_delta_without_the_block(self):
-        delta = {"add": ["не задавай вопросов"], "remove": [], "update": []}
-        fake = FakeOpenAI(_chat_response(f"Разъёб.\n{roast.RULES_MARKER}{json.dumps(delta)}"))
+    async def test_roast_returns_the_attached_rule_ops_without_the_block(self):
+        ops = [{"action": "create", "text": "не задавай вопросов"}]
+        fake = FakeOpenAI(_chat_response(f"Разъёб.\n{roast.RULES_MARKER}{_ops(*ops)}"))
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
             reply = await roast.roast([{"role": "user", "content": "x"}])
 
-        self.assertEqual(reply, roast.RoastReply("Разъёб.", delta))
+        self.assertEqual(reply, roast.RoastReply("Разъёб.", ops))
 
     async def test_roast_raises_when_only_a_rules_block_comes_back(self):
-        fake = FakeOpenAI(_chat_response(f"{roast.RULES_MARKER}{{\"add\": [\"x\"]}}"))
+        fake = FakeOpenAI(_chat_response(f"{roast.RULES_MARKER}{_ops({'action': 'create', 'text': 'x'})}"))
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
             with self.assertRaisesRegex(RuntimeError, "empty response"):
                 await roast.roast([{"role": "user", "content": "x"}])
 
-    async def test_extract_profile_points_parses_normalizes_and_dedupes(self):
+    async def test_extract_profile_points_applies_ops_and_shows_ids_to_the_model(self):
         long_point = "x" * (roast.MAX_PROFILE_POINT_LENGTH + 20)
-        raw = json.dumps({"add": [
-            "  likes   hiking  ",
-            "likes hiking",
-            "",
-            42,
-            long_point,
-        ]})
+        raw = _ops(
+            {"action": "create", "text": "  likes   hiking  "},
+            {"action": "create", "text": "likes hiking"},
+            {"action": "create", "text": ""},
+            {"action": "create", "text": long_point},
+        )
         fake = FakeOpenAI(_chat_response(raw))
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
-            points = await roast.extract_profile_points("entry text", ["known fact"])
+            points = await roast.extract_profile_points("entry text", _items("known fact"))
 
-        self.assertEqual(points, ["known fact", "likes hiking", long_point])
-        # deduped, empties/non-strings dropped, long points never truncated
+        # Whitespace collapsed, repeats and empties dropped, long facts never truncated.
+        self.assertEqual(memory.texts(points), ["known fact", "likes hiking", long_point])
 
         kwargs = fake.chat.completions.calls[0]
         self.assertEqual(kwargs["model"], roast.settings.openai_profile_model)
         self.assertEqual(kwargs["response_format"], {"type": "json_object"})
+        # The model sees each known fact with its id, so it can address one.
+        self.assertIn('"id": "1"', kwargs["messages"][1]["content"])
         self.assertIn("known fact", kwargs["messages"][1]["content"])
 
     async def test_extract_profile_points_does_not_cap_count(self):
         count = roast.MAX_PROFILE_POINTS + 5
-        raw = json.dumps({"add": [f"fact {i}" for i in range(count)]})
+        raw = _ops(*({"action": "create", "text": f"fact {i}"} for i in range(count)))
         fake = FakeOpenAI(_chat_response(raw))
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
@@ -213,11 +227,11 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(points), count)  # count is guided at the prompt level, never capped mechanically
 
     async def test_extract_profile_points_passes_focus_to_the_model(self):
-        fake = FakeOpenAI(_chat_response(json.dumps({"add": ["fact"]})))
+        fake = FakeOpenAI(_chat_response(_ops({"action": "create", "text": "fact"})))
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
-            await roast.extract_profile_points("entry", ["known"], focus="work and health")
+            await roast.extract_profile_points("entry", _items("known"), focus="work and health")
 
         kwargs = fake.chat.completions.calls[0]
         system, user = kwargs["messages"]
@@ -227,18 +241,18 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('"focus"', user["content"])
 
     async def test_extract_profile_points_omits_focus_when_absent(self):
-        fake = FakeOpenAI(_chat_response(json.dumps({"add": ["fact"]})))
+        fake = FakeOpenAI(_chat_response(_ops({"action": "create", "text": "fact"})))
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
-            await roast.extract_profile_points("entry", ["known"])
+            await roast.extract_profile_points("entry", _items("known"))
 
         kwargs = fake.chat.completions.calls[0]
         self.assertEqual(kwargs["messages"][0]["content"], roast.PROFILE_EXTRACTION_PROMPT)
         self.assertNotIn('"focus"', kwargs["messages"][1]["content"])
 
     async def test_extract_profile_points_uses_budget_and_pinned_reasoning_effort(self):
-        fake = FakeOpenAI(_chat_response(json.dumps({"add": ["fact"]})))
+        fake = FakeOpenAI(_chat_response(_ops({"action": "create", "text": "fact"})))
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
@@ -248,35 +262,36 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["max_completion_tokens"], roast.PROFILE_MAX_COMPLETION_TOKENS)
         self.assertEqual(kwargs["reasoning_effort"], roast.PROFILE_REASONING_EFFORT)
 
-    def test_profile_budget_covers_the_worst_case_delta(self):
-        # Deltas are small in steady state, but a first pass over a dense note
-        # can add many facts at once. Russian points run ~32 tokens each, and
-        # reasoning tokens share the same ceiling — so keep real headroom over
-        # a delta that populates the whole profile.
-        worst_case_output = roast.MAX_PROFILE_POINTS * 32
+    def test_profile_budget_covers_the_worst_case_note(self):
+        # A pass only ever reports its own operations, never the profile, so the
+        # ceiling tracks one dense note rather than the accumulated list. Russian
+        # facts run ~32 tokens each, and reasoning tokens share the same ceiling.
+        worst_case_output = roast.MAX_PROFILE_OPS_PER_NOTE * 32
         self.assertGreater(roast.PROFILE_MAX_COMPLETION_TOKENS, worst_case_output * 2)
 
     async def test_extract_profile_points_keeps_existing_profile_when_truncated(self):
         # A truncated completion has no content. Accumulated knowledge must
         # survive it: return what we already knew instead of raising.
         fake = FakeOpenAI(_chat_response("", finish_reason="length"))
+        existing = _items("known fact", "other fact")
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
-            points = await roast.extract_profile_points("entry", ["known fact", "other fact"])
+            points = await roast.extract_profile_points("entry", existing)
 
-        self.assertEqual(points, ["known fact", "other fact"])
+        self.assertEqual(points, existing)
 
     async def test_extract_profile_points_keeps_existing_profile_on_partial_json(self):
         # Running out of budget mid-object yields unparseable JSON, not an empty
         # string — the same no-op path has to cover it.
-        fake = FakeOpenAI(_chat_response('{"add": ["half a fa', finish_reason="length"))
+        fake = FakeOpenAI(_chat_response('{"ops": [{"action": "cre', finish_reason="length"))
+        existing = _items("known fact")
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
-            points = await roast.extract_profile_points("entry", ["known fact"])
+            points = await roast.extract_profile_points("entry", existing)
 
-        self.assertEqual(points, ["known fact"])
+        self.assertEqual(points, existing)
 
     async def test_extract_profile_points_returns_empty_when_truncated_with_no_history(self):
         fake = FakeOpenAI(_chat_response("", finish_reason="length"))
@@ -285,29 +300,36 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(roast, "client", fake):
             self.assertEqual(await roast.extract_profile_points("entry", []), [])
 
-    async def test_extract_profile_points_merges_a_full_delta(self):
-        raw = json.dumps({
-            "add": ["newly durable trait"],
-            "remove": ["stale fact"],
-            "update": [{"from": "vague fact", "to": "sharpened fact"}],
-        })
+    async def test_extract_profile_points_applies_a_mixed_batch_of_ops(self):
+        raw = _ops(
+            {"action": "create", "text": "newly durable trait"},
+            {"action": "delete", "id": "3"},
+            {"action": "modify", "id": "2", "text": "sharpened fact"},
+        )
         fake = FakeOpenAI(_chat_response(raw))
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
             points = await roast.extract_profile_points(
-                "entry", ["keep me", "vague fact", "stale fact"]
+                "entry", _items("keep me", "vague fact", "stale fact")
             )
 
-        # Untouched facts keep their position, the update rewrites in place,
-        # the removal drops out, and the addition lands at the end.
-        self.assertEqual(points, ["keep me", "sharpened fact", "newly durable trait"])
+        # Untouched facts keep their position and id, a modify rewrites in place,
+        # a delete drops out, and a create lands at the end with a fresh id.
+        self.assertEqual(
+            points,
+            [
+                memory.MemoryItem("1", "keep me"),
+                memory.MemoryItem("2", "sharpened fact"),
+                memory.MemoryItem("4", "newly durable trait"),
+            ],
+        )
 
-    async def test_extract_profile_points_keeps_profile_on_empty_delta(self):
+    async def test_extract_profile_points_keeps_profile_on_empty_ops(self):
         # The common case: nothing durable in this entry. Costs a handful of
         # output tokens no matter how large the profile has grown.
-        fake = FakeOpenAI(_chat_response(json.dumps({"add": [], "remove": [], "update": []})))
-        existing = [f"fact {i}" for i in range(80)]
+        fake = FakeOpenAI(_chat_response(_ops()))
+        existing = _items(*(f"fact {i}" for i in range(80)))
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
@@ -316,18 +338,12 @@ class RoastServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(points, existing)
 
     async def test_extract_profile_points_survives_a_non_object_response(self):
-        fake = FakeOpenAI(_chat_response(json.dumps(["not", "a", "delta"])))
+        fake = FakeOpenAI(_chat_response(json.dumps(["not", "an", "ops", "block"])))
+        existing = _items("known")
 
         with patch.object(roast.settings, "openai_api_key", "key"), \
                 patch.object(roast, "client", fake):
-            self.assertEqual(await roast.extract_profile_points("entry", ["known"]), ["known"])
-
-
-    def test_is_configured_reflects_api_key(self):
-        with patch.object(roast.settings, "ai_api_key", "key"):
-            self.assertTrue(roast.is_configured())
-        with patch.object(roast.settings, "ai_api_key", ""):
-            self.assertFalse(roast.is_configured())
+            self.assertEqual(await roast.extract_profile_points("entry", existing), existing)
 
 
 class RulesBlockTests(unittest.TestCase):
@@ -335,68 +351,44 @@ class RulesBlockTests(unittest.TestCase):
         # The steady-state answer: nothing to save, nothing to strip.
         self.assertEqual(roast.split_rules_update("  Just a roast.  "), ("Just a roast.", None))
 
-    def test_marker_is_stripped_and_the_delta_parsed(self):
-        delta = {"add": ["будь короче"]}
-        text, parsed = roast.split_rules_update(f"Roast text.\n\n{roast.RULES_MARKER}{json.dumps(delta)}")
+    def test_marker_is_stripped_and_the_ops_parsed(self):
+        ops = [{"action": "create", "text": "будь короче"}]
+        text, parsed = roast.split_rules_update(f"Roast text.\n\n{roast.RULES_MARKER}{_ops(*ops)}")
         self.assertEqual(text, "Roast text.")
-        self.assertEqual(parsed, delta)
+        self.assertEqual(parsed, ops)
 
     def test_fenced_block_is_stripped_from_both_sides(self):
-        answer = f'Roast text.\n\n```\n{roast.RULES_MARKER}{{"add": ["будь короче"]}}\n```'
+        block = _ops({"action": "delete", "id": "2"})
+        answer = f"Roast text.\n\n```\n{roast.RULES_MARKER}{block}\n```"
         text, parsed = roast.split_rules_update(answer)
         self.assertEqual(text, "Roast text.")
-        self.assertEqual(parsed, {"add": ["будь короче"]})
+        self.assertEqual(parsed, [{"action": "delete", "id": "2"}])
 
     def test_unparseable_block_is_dropped_and_never_shown(self):
-        text, parsed = roast.split_rules_update(f'Roast text.\n{roast.RULES_MARKER}{{"add": ["half')
+        text, parsed = roast.split_rules_update(f'Roast text.\n{roast.RULES_MARKER}{{"ops": [{{"act')
         self.assertEqual(text, "Roast text.")
         self.assertIsNone(parsed)
 
-    def test_non_object_block_is_dropped(self):
-        text, parsed = roast.split_rules_update(f'Roast text.\n{roast.RULES_MARKER}["not", "a", "delta"]')
-        self.assertEqual(text, "Roast text.")
-        self.assertIsNone(parsed)
+    def test_block_without_ops_is_dropped(self):
+        for block in ('["not", "a", "block"]', '{"add": ["будь короче"]}', '{"ops": []}',
+                      '{"ops": "not a list"}'):
+            with self.subTest(block=block):
+                text, parsed = roast.split_rules_update(f"Roast text.\n{roast.RULES_MARKER}{block}")
+                self.assertEqual(text, "Roast text.")
+                self.assertIsNone(parsed)
 
     def test_first_marker_cuts_the_text_and_trailing_output_is_ignored(self):
         answer = (
-            f'Roast text.\n{roast.RULES_MARKER}{{"add": ["первое"]}}'
-            f'\n{roast.RULES_MARKER}{{"add": ["второе"]}}'
+            f'Roast text.\n{roast.RULES_MARKER}{_ops({"action": "create", "text": "первое"})}'
+            f'\n{roast.RULES_MARKER}{_ops({"action": "create", "text": "второе"})}'
         )
         text, parsed = roast.split_rules_update(answer)
         self.assertEqual(text, "Roast text.")
-        self.assertEqual(parsed, {"add": ["первое"]})
+        self.assertEqual(parsed, [{"action": "create", "text": "первое"}])
         self.assertNotIn(roast.RULES_MARKER, text)
 
 
-class DeltaMergeTests(unittest.TestCase):
-    def test_matches_quoted_facts_despite_reflowed_whitespace_and_case(self):
-        delta = {"remove": ["  STALE   fact "], "update": [{"from": "Vague  Fact", "to": "sharp"}]}
-        self.assertEqual(
-            roast.apply_delta(["keep", "vague fact", "stale fact"], delta),
-            ["keep", "sharp"],
-        )
-
-    def test_removal_wins_over_an_update_of_the_same_fact(self):
-        delta = {"remove": ["gone"], "update": [{"from": "gone", "to": "revived"}]}
-        self.assertEqual(roast.apply_delta(["keep", "gone"], delta), ["keep"])
-
-    def test_unmatched_update_is_kept_as_an_addition(self):
-        # The model meant to record "to" either way; dropping it loses knowledge.
-        delta = {"update": [{"from": "never known", "to": "worth keeping"}]}
-        self.assertEqual(
-            roast.apply_delta(["keep"], delta), ["keep", "worth keeping"]
-        )
-
-    def test_unknown_removal_and_duplicate_add_are_harmless(self):
-        delta = {"remove": ["never known"], "add": ["keep", "fresh"]}
-        self.assertEqual(roast.apply_delta(["keep"], delta), ["keep", "fresh"])
-
-    def test_malformed_delta_fields_leave_the_profile_intact(self):
-        for delta in ({"add": "not a list"}, {"update": ["not a pair"]},
-                      {"update": [{"from": "keep"}]}, {"remove": [None, 7]}, {}):
-            with self.subTest(delta=delta):
-                self.assertEqual(roast.apply_delta(["keep"], delta), ["keep"])
-
+class ConfigTests(unittest.TestCase):
     def test_is_configured_reflects_api_key(self):
         with patch.object(roast.settings, "ai_api_key", "key"):
             self.assertTrue(roast.is_configured())

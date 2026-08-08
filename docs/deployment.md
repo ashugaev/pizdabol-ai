@@ -70,10 +70,11 @@ services/
 ├── notion.py           # Notion API: create/read diary pages
 ├── notion_memory.py    # Mirrors the bot's memory to Notion pages next to the database
 ├── summary.py          # Daily summary & weekly report
+├── memory.py           # ID-addressed memory: create/modify/delete ops on facts and rules
 ├── roast.py            # Roast mode + author profile
 ├── profile_rebuild.py  # Sequential profile rebuild over all notes (/memory)
 ├── stats.py            # Audio-minute stats
-├── state_store.py      # Local JSON state (messages, drafts, profile)
+├── state_store.py      # Local JSON state (messages, drafts, profile, rules)
 └── diary_dates.py      # Diary-day date logic
 Makefile                # Dev & deploy commands
 requirements.txt

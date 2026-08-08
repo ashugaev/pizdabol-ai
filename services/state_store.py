@@ -5,6 +5,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from services import memory
+from services.memory import MemoryItem
+
 
 STATE_PATH = Path(os.getenv("BOT_STATE_PATH", ".data/message_state.json"))
 MAX_RETAINED_MESSAGES = 200
@@ -224,29 +227,28 @@ class StateStore:
             return True
         return int(stored) == int(value)
 
-    def get_profile_points(self) -> list[str]:
-        return list(self.data["profile"].get("points", []))
+    def get_profile_points(self) -> list[MemoryItem]:
+        """Durable facts about the author, each with the id the model addresses."""
+        return memory.load(self.data["profile"].get("points", []))
 
-    def set_profile_points(self, points: list[str]) -> None:
+    def set_profile_points(self, points: list[MemoryItem]) -> None:
         # No mechanical cap — the list size is guided at the prompt level.
-        cleaned = [point.strip() for point in points if isinstance(point, str) and point.strip()]
         self.data["profile"] = {
-            "points": cleaned,
+            "points": memory.dump(points),
             "notion_mirror": self.data["profile"].get("notion_mirror", []),
             "updated_at": _now(),
         }
         self._save()
 
-    def get_rules(self) -> list[str]:
+    def get_rules(self) -> list[MemoryItem]:
         """Standing behavior rules the author dictated to the bot."""
-        return list(self.data["rules"].get("items", []))
+        return memory.load(self.data["rules"].get("items", []))
 
-    def set_rules(self, rules: list[str]) -> None:
+    def set_rules(self, rules: list[MemoryItem]) -> None:
         # Callers only write when the list actually changed — an unchanged list
         # never touches disk.
-        cleaned = [rule.strip() for rule in rules if isinstance(rule, str) and rule.strip()]
         self.data["rules"] = {
-            "items": cleaned,
+            "items": memory.dump(rules),
             "notion_mirror": self.data["rules"].get("notion_mirror", []),
             "updated_at": _now(),
         }

@@ -10,6 +10,7 @@ os.environ.setdefault("NOTION_TOKEN", "test-notion-token")
 os.environ.setdefault("NOTION_DATABASE_ID", "test-notion-db")
 os.environ.setdefault("ALLOWED_USER_ID", "1")
 
+from services import memory
 from services import state_store as state_store_module
 from services.state_store import PROFILE_SECTION, RULES_SECTION, StateStore
 
@@ -57,31 +58,32 @@ class StateStoreTests(unittest.TestCase):
             store.remove_draft("entry-1")
             self.assertIsNone(store.get_draft("entry-1"))
 
-    def test_profile_points_default_persist_clean_and_cap(self):
+    def test_profile_points_carry_ids_persist_and_never_cap(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "state.json"
             store = StateStore(path)
             self.assertEqual(store.get_profile_points(), [])
 
-            store.set_profile_points(["  likes hiking ", "", "avoids conflict", 5])
-            self.assertEqual(store.get_profile_points(), ["likes hiking", "avoids conflict"])
+            store.set_profile_points(memory.load(["  likes hiking ", "", "avoids conflict"]))
+            stored = store.get_profile_points()
+            self.assertEqual(memory.texts(stored), ["likes hiking", "avoids conflict"])
 
-            # Persisted and reloaded from disk.
-            self.assertEqual(StateStore(path).get_profile_points(), ["likes hiking", "avoids conflict"])
+            # Ids persist with the text, so the model can address a fact next time.
+            self.assertEqual(StateStore(path).get_profile_points(), stored)
 
-            many = [f"fact {i}" for i in range(150)]
-            store.set_profile_points(many)
+            store.set_profile_points(memory.load([f"fact {i}" for i in range(150)]))
             self.assertEqual(len(store.get_profile_points()), 150)  # no mechanical cap on list size
 
-    def test_rules_default_persist_and_clean(self):
+    def test_rules_carry_ids_and_persist(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "state.json"
             store = StateStore(path)
             self.assertEqual(store.get_rules(), [])
 
-            store.set_rules(["  не задавай вопросов ", "", "пиши коротко", 5])
-            self.assertEqual(store.get_rules(), ["не задавай вопросов", "пиши коротко"])
-            self.assertEqual(StateStore(path).get_rules(), ["не задавай вопросов", "пиши коротко"])
+            store.set_rules(memory.load(["  не задавай вопросов ", "", "пиши коротко"]))
+            stored = store.get_rules()
+            self.assertEqual(memory.texts(stored), ["не задавай вопросов", "пиши коротко"])
+            self.assertEqual(StateStore(path).get_rules(), stored)
 
     def test_notion_mirror_persists_and_survives_a_local_rewrite(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -94,10 +96,10 @@ class StateStoreTests(unittest.TestCase):
 
             # Writing the rules must not drop what the Notion page is known to list,
             # otherwise the next sync reads a hand edit into every stale page.
-            store.set_rules(["пиши коротко", "не задавай вопросов"])
+            store.set_rules(memory.load(["пиши коротко", "не задавай вопросов"]))
             self.assertEqual(store.get_notion_mirror(RULES_SECTION), ["пиши коротко"])
 
-            store.set_profile_points(["likes hiking"])
+            store.set_profile_points(memory.load(["likes hiking"]))
             self.assertEqual(store.get_notion_mirror(PROFILE_SECTION), [])
 
     def test_state_written_before_rules_existed_still_loads(self):
@@ -110,7 +112,8 @@ class StateStoreTests(unittest.TestCase):
             store = StateStore(path)
 
             self.assertEqual(store.get_rules(), [])
-            self.assertEqual(store.get_profile_points(), ["old"])
+            # A profile stored as plain strings gets ids on read, nothing is lost.
+            self.assertEqual(store.get_profile_points(), [memory.MemoryItem("1", "old")])
 
     def test_recent_unprocessed_messages_returns_oldest_to_newest_within_limit(self):
         with tempfile.TemporaryDirectory() as tmpdir:
